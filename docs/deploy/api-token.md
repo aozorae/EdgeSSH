@@ -4,11 +4,13 @@
 
 ## 创建入口
 
-1. 登录 Cloudflare Dashboard。
+1. 登录 Cloudflare 控制面板（Dashboard）。
 2. 打开右上角个人资料。
-3. 进入 **My Profile → API Tokens**。
-4. 选择 **Create Token**。
-5. 以 **Edit Cloudflare Workers** 模板作为起点。
+3. 进入 **我的个人资料（My Profile）→ API 令牌（API Tokens）**。
+4. 选择 **创建令牌（Create Token）**。
+5. 以 **编辑 Cloudflare Workers（Edit Cloudflare Workers）** 模板作为起点。
+
+Cloudflare 中文界面仍可能显示部分英文产品名或权限名，按括号中的英文原名定位即可。
 
 ## 权限建议
 
@@ -16,12 +18,12 @@
 
 | 范围 | 权限 | 用途 |
 | --- | --- | --- |
-| Account | Workers Scripts: Edit | 创建或更新 EdgeSSH Worker |
-| Account | D1: Edit | 查找、创建 D1 并执行 migration |
-| Account | Account Settings: Read | 自动发现账户 |
-| Account | Access: Apps and Policies: Edit | **仅 cloudflare 模式**：创建/复用 Access 应用和策略 |
-| Account | Access: Organizations, Identity Providers, and Groups: Edit | **仅 cloudflare 模式**：读取团队域、创建/复用 OTP |
-| Zone | Workers Routes: Edit、Zone: Read | **仅自定义域名**：绑定 `CUSTOM_DOMAIN` |
+| 账户（Account） | Workers 脚本（Workers Scripts）：编辑（Edit） | 创建或更新 EdgeSSH Worker |
+| 账户（Account） | D1：编辑（Edit） | 查找、创建 D1 并执行 migration |
+| 账户（Account） | 账户设置（Account Settings）：读取（Read） | 自动发现账户 |
+| 账户（Account） | Access：应用和策略（Apps and Policies）：编辑（Edit） | **仅 cloudflare 模式**：创建/复用 Access 应用和策略 |
+| 账户（Account） | Access：组织、身份提供程序和组（Organizations, Identity Providers, and Groups）：编辑（Edit） | **仅 cloudflare 模式**：读取团队域、创建/复用 OTP |
+| 区域（Zone） | Workers 路由（Workers Routes）：编辑（Edit）；区域（Zone）：读取（Read） | **使用自定义域名时需要**：绑定 `CUSTOM_DOMAIN` |
 
 Cloudflare 控制台的权限名称可能随界面调整。判断标准是：Token 能部署 Worker、管理目标账户的 D1，并为目标 Zone 配置 Worker 自定义域名。
 
@@ -41,13 +43,13 @@ Cloudflare 控制台的权限名称可能随界面调整。判断标准是：Tok
 Token 创建完成后，只会完整显示一次：
 
 1. 复制 Token。
-2. 打开 Fork 的 `Settings → Secrets and variables → Actions`。
-3. 在 **Secrets** 中创建 `CLOUDFLARE_API_TOKEN`。
+2. 打开 Fork 的 **设置（Settings）→ 机密和变量（Secrets and variables）→ Actions**。
+3. 在 **机密（Secrets）** 中创建 `CLOUDFLARE_API_TOKEN`。
 4. 粘贴并保存。
 
 不要把 Token 存为普通 Variable。也不要把 Token 写入 `.env`、`.dev.vars`、`wrangler.toml`、README 或截图。
 
-GitHub 模式不需要任何 Access/IdP 权限。创建完成后回到[部署流程](/deploy/actions)，只填写所选模式的参数。仅使用 workers.dev 时无需自定义域名的 Zone 权限。
+GitHub 模式不需要任何 Access/IdP 权限。创建完成后回到[部署流程](/deploy/actions)，只填写所选模式的参数。多数用户使用自定义域名，需要上表的 Zone 权限；仅使用 `workers.dev` 时不需要。
 
 ## 验证与排错
 

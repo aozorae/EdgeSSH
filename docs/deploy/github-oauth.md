@@ -7,18 +7,18 @@
 在 GitHub 个人设置中进入：
 
 ```text
-Settings → Developer settings → OAuth Apps → New OAuth App
+设置（Settings）→ 开发者设置（Developer settings）→ OAuth 应用（OAuth Apps）→ 新建 OAuth 应用（New OAuth App）
 ```
 
 填写：
 
 | 字段 | 示例 |
 | --- | --- |
-| Application name | `My EdgeSSH` |
-| Homepage URL | `https://edgessh.your-subdomain.workers.dev` |
-| Authorization callback URL | `https://edgessh.your-subdomain.workers.dev/auth/callback` |
+| 应用名称（Application name） | `My EdgeSSH` |
+| 主页 URL（Homepage URL） | `https://ssh.example.com` |
+| 授权回调 URL（Authorization callback URL） | `https://ssh.example.com/auth/callback` |
 
-自定义域名同理，例如 `https://ssh.example.com/auth/callback`。协议、hostname 和路径必须与实际入口一致，不要只填首页。
+这里优先使用 `CUSTOM_DOMAIN` 对应的正式入口。协议、hostname 和路径必须与实际入口一致，不要只填首页；使用 `workers.dev` 时再换成部署摘要给出的地址。
 
 ::: tip 首次还不知道访问地址？
 可以先为 OAuth App 使用占位 URL，填好 Client ID/Secret 后运行 Action。部署摘要会给出正式入口与回调地址，复制回 OAuth App 设置后再登录。默认 Worker 名为 `edgessh`，设置 `WORKER_NAME` 时地址也会改变。
@@ -28,11 +28,12 @@ OAuth App 需用户在 GitHub 创建；普通 GitHub Token 没有官方创建 OA
 
 ## 2. 保存 Client ID 和 Secret
 
-在 OAuth App 页面复制 Client ID，点击 **Generate a new client secret**。然后进入 Fork 仓库 **Settings → Secrets and variables → Actions**：
+在 OAuth App 页面复制 **客户端 ID（Client ID）**，点击 **生成新的客户端密钥（Generate a new client secret）**。然后进入 Fork 仓库 **设置（Settings）→ 机密和变量（Secrets and variables）→ Actions**：
 
 | 名称 | 位置 | 填什么 |
 | --- | --- | --- |
 | `AUTH_PROVIDER` | Variables | `github` |
+| `CUSTOM_DOMAIN` | Variables | 推荐填正式主机名，如 `ssh.example.com`；使用 `workers.dev` 时留空 |
 | `GITHUB_CLIENT_ID` | Variables | 刚创建的 OAuth App Client ID |
 | `GITHUB_CLIENT_SECRET` | Secrets | 同一 OAuth App 的 Client Secret |
 | `GITHUB_ADMIN` | Variables | 你允许登录的个人 GitHub 用户名 |
@@ -42,7 +43,7 @@ OAuth App 需用户在 GitHub 创建；普通 GitHub Token 没有官方创建 OA
 
 ## 3. 运行与登录
 
-运行 **Actions → Deploy → Run workflow**，管理员邮箱框留空。Action 会解析管理员数字 ID、部署应用并输出回调地址。
+运行 **Actions → Deploy → 运行工作流（Run workflow）**，管理员邮箱框留空。Action 会解析管理员数字 ID、部署应用并输出回调地址。
 
 打开 EdgeSSH，点击右上角 **登录**，在 GitHub 确认授权。成功后回到主机总览。登录只使用公开身份，不申请仓库、组织或私人邮箱权限。
 

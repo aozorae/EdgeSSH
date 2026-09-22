@@ -32,7 +32,7 @@ hero:
     <div>
       <span>01</span>
       <strong>准备 Cloudflare</strong>
-      <p>创建 Workers/D1 部署 Token。自定义域名可选，默认使用 workers.dev。</p>
+      <p>创建 Workers/D1 部署 Token，优先准备自定义域名；没有域名时再使用 workers.dev。</p>
     </div>
     <div>
       <span>02</span>

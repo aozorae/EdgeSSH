@@ -1,6 +1,6 @@
 # 配置项
 
-唯一用户配置入口：GitHub **Settings → Secrets and variables → Actions**。根据 `AUTH_PROVIDER` 只填一组认证参数。
+唯一用户配置入口：GitHub **设置（Settings）→ 机密和变量（Secrets and variables）→ Actions**。先确定 `CUSTOM_DOMAIN`，再根据 `AUTH_PROVIDER` 只填一组认证参数。
 
 ## 必填与按模式必填
 
@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | `AUTH_PROVIDER` | Variable | `cloudflare` 或 `github`，默认 `cloudflare` |
 | `CLOUDFLARE_API_TOKEN` | Secret | 两种模式都需要的云资源部署凭据 |
+| `CUSTOM_DOMAIN` | Variable，兼容 Secret | 两种模式都推荐填写，如 `ssh.example.com`；使用 `workers.dev` 时留空 |
 | `ADMIN_EMAIL` | Variable，兼容 Secret | Cloudflare 模式管理员邮箱；Run workflow 输入优先 |
 | `GITHUB_CLIENT_ID` | Variable | 仅 GitHub 模式，OAuth App 的 Client ID |
 | `GITHUB_CLIENT_SECRET` | Secret | 仅 GitHub 模式，同一 OAuth App 的 Client Secret |
@@ -21,7 +22,6 @@
 | `WORKER_NAME` | Variable | `edgessh` |
 | `D1_DATABASE_NAME` | Variable | `<Worker 名>-accounts` |
 | `D1_DATABASE_ID` | Variable | 指定已有 D1；不存在时停止，不另建空库替代 |
-| `CUSTOM_DOMAIN` | Variable，兼容 Secret | 如 `ssh.example.com`；Secret 优先；使用 workers.dev 留空 |
 | `ACCESS_IDP_IDS` | Variable | 仅 Cloudflare 模式新建应用：逗号分隔的已有 IdP UUID |
 | `ENCRYPTION_KEY` | Secret，仅高级恢复/首次自备 | 32 字节 Base64；已有 Worker 密钥不会被覆盖 |
 

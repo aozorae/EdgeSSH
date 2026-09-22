@@ -10,22 +10,22 @@
 
 ## 1. 准备登录方式
 
-个人部署可以使用 One-time PIN 邮件验证码。若 Zero Trust 组织中没有该选项：
+个人部署可以使用一次性 PIN（One-time PIN）邮件验证码。若 Zero Trust 组织中没有该选项：
 
-1. 进入 **Zero Trust → Integrations → Identity providers**。
-2. 选择 **Add new identity provider**。
-3. 添加 **One-time PIN** 并保存。
+1. 进入 **Zero Trust → 集成（Integrations）→ 身份提供程序（Identity providers）**。
+2. 选择 **添加新的身份提供程序（Add new identity provider）**。
+3. 添加 **一次性 PIN（One-time PIN）** 并保存。
 
 如果已经配置 Google、GitHub、Microsoft Entra ID 或其他身份提供程序，可以继续使用已有方式。
 
-## 2. 创建 Self-hosted 应用
+## 2. 创建自托管（Self-hosted）应用
 
-1. 进入 **Zero Trust → Access controls → Applications**。
-2. 选择 **Create new application**。
-3. 选择 **Self-hosted and private**。
-4. 添加 Public hostname。
-5. Application name 填写 `EdgeSSH`。
-6. Public hostname 填实际入口；默认可用 `edgessh.<子域>.workers.dev`，有 `CUSTOM_DOMAIN` 时使用该自定义域名。
+1. 进入 **Zero Trust → 访问控制（Access controls）→ 应用程序（Applications）**。
+2. 选择 **创建新应用程序（Create new application）**。
+3. 选择 **自托管和私有应用（Self-hosted and private）**。
+4. 添加**公共主机名（Public hostname）**。
+5. **应用程序名称（Application name）**填写 `EdgeSSH`。
+6. **公共主机名（Public hostname）**填实际入口；推荐使用 `CUSTOM_DOMAIN` 对应的自定义域名，只有未配置它时才使用 `edgessh.<子域>.workers.dev`。
 
 <ScreenshotPlaceholder
   title="EdgeSSH Access 应用"
@@ -38,15 +38,15 @@
 
 ## 3. 添加 Allow 策略
 
-在应用的 Access policies 中创建策略：
+在应用的**访问策略（Access policies）**中创建策略：
 
 | 项目 | 推荐值 |
 | --- | --- |
-| Policy name | `EdgeSSH Admin` |
-| Action | `Allow` |
-| Rule type | `Include` |
-| Selector | `Emails` |
-| Value | 你的完整管理员邮箱 |
+| 策略名称（Policy name） | `EdgeSSH Admin` |
+| 操作（Action） | 允许（Allow） |
+| 规则类型（Rule type） | 包括（Include） |
+| 选择器（Selector） | 电子邮件（Emails） |
+| 值（Value） | 你的完整管理员邮箱 |
 
 本项目只有一个管理员资料库，请只允许明确管理员。不要使用整域授权、Everyone 或 Bypass；增加可登录身份相当于授予其整个管理员资料库权限。
 
@@ -61,7 +61,7 @@
 
 ## 4. 获取 Team Domain
 
-Action 自动取得并保存 `ACCESS_TEAM_DOMAIN` 到 Worker Secret，不用复制回 GitHub。排障时可在 Zero Trust 设置找到 Team domain：
+Action 自动取得并保存 `ACCESS_TEAM_DOMAIN` 到 Worker Secret，不用复制回 GitHub。排障时可在 Zero Trust **设置（Settings）**中找到**团队域（Team domain）**：
 
 ```text
 my-team.cloudflareaccess.com
@@ -71,9 +71,9 @@ my-team.cloudflareaccess.com
 
 ## 5. 获取 Application Audience
 
-1. 回到 **Access controls → Applications**。
+1. 回到 **访问控制（Access controls）→ 应用程序（Applications）**。
 2. 打开刚创建的 EdgeSSH 应用。
-3. 在 Additional settings 中找到 **Application Audience (AUD) Tag**。
+3. 在**其他设置（Additional settings）**中找到**应用受众 (AUD) 标签（Application Audience (AUD) Tag）**。
 4. 核对当前应用的 AUD。Action 会自动将其写入 Worker `ACCESS_AUD` Secret，无需手工复制。
 
 不要把应用 ID、Client ID 或策略 ID 当成 AUD。

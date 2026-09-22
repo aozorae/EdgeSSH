@@ -1,12 +1,14 @@
 # 使用 GitHub Actions 部署
 
-**选一种登录方式，填对应变量，运行一次 Deploy。** 应用始终部署到 Cloudflare Workers；`AUTH_PROVIDER` 只决定管理员怎样登录，不是选择云服务商。
+**先确定访问域名，再选一种登录方式，填对应变量并运行一次 Deploy。** 应用始终部署到 Cloudflare Workers；`AUTH_PROVIDER` 只决定管理员怎样登录，不是选择云服务商。
 
-## 1. Fork 并准备 Token
+## 1. Fork、确定域名并准备 Token
 
-Fork [EdgeSSH](https://github.com/aozorae/EdgeSSH)，启用 Actions。在仓库 **Settings → Secrets and variables → Actions** 中保存 `CLOUDFLARE_API_TOKEN` **Secret**。
+Fork [EdgeSSH](https://github.com/aozorae/EdgeSSH)，启用 Actions。在仓库 **设置（Settings）→ 机密和变量（Secrets and variables）→ Actions** 中保存 `CLOUDFLARE_API_TOKEN` **Secret**。
 
-Token 权限见[创建 API Token](/deploy/api-token)。账户 ID、D1 ID 和加密密钥通常不需要填写；自定义域名也不是必需项。
+多数用户建议准备一个由同一 Cloudflare 账户管理的自定义域名，例如 `ssh.example.com`，并将主机名保存为 `CUSTOM_DOMAIN` **Variable**。只填主机名，不带 `https://`、路径或通配符。Action 会自动绑定 Worker，Cloudflare 负责 DNS 与证书。
+
+不打算使用自定义域名时，可将 `CUSTOM_DOMAIN` 留空，Action 会使用 `workers.dev` 地址；不要把 `*.workers.dev` 填进该变量。Token 权限见[创建 API Token](/deploy/api-token)。账户 ID、D1 ID 和加密密钥通常不需要填写。
 
 ## 2. 二选一填写配置
 
@@ -18,6 +20,7 @@ Token 权限见[创建 API Token](/deploy/api-token)。账户 ID、D1 ID 和加�
 | --- | --- | --- |
 | `AUTH_PROVIDER` | Variable | `cloudflare`（不填也默认此模式） |
 | `CLOUDFLARE_API_TOKEN` | Secret | 含 Access/IdP 管理权限的 Cloudflare Token |
+| `CUSTOM_DOMAIN` | Variable | 推荐填写实际主机名，如 `ssh.example.com`；使用 `workers.dev` 时留空 |
 | `ADMIN_EMAIL` | Variable | 你的管理员邮箱；也可在 Run workflow 输入 |
 
 Action 自动创建/复用 Access 应用、明确邮箱 Allow 策略与 OTP，获取 Team Domain 和 AUD，并写入 Worker Secrets。不需要手工复制这些参数。
@@ -30,6 +33,7 @@ Action 自动创建/复用 Access 应用、明确邮箱 Allow 策略与 OTP，�
 | --- | --- | --- |
 | `AUTH_PROVIDER` | Variable | `github` |
 | `CLOUDFLARE_API_TOKEN` | Secret | Workers/D1 部署 Token |
+| `CUSTOM_DOMAIN` | Variable | 推荐填写实际主机名，如 `ssh.example.com`；使用 `workers.dev` 时留空 |
 | `GITHUB_CLIENT_ID` | Variable | GitHub OAuth App 的 Client ID |
 | `GITHUB_CLIENT_SECRET` | Secret | 同一 OAuth App 的 Client Secret |
 | `GITHUB_ADMIN` | Variable | 唯一允许登录的个人 GitHub 用户名 |
@@ -42,19 +46,19 @@ API Token、Client Secret 和加密密钥不能放普通 Variable。其他模式
 
 ## 3. 运行 Deploy
 
-进入 **Actions → Deploy → Run workflow**，选择 `main`。Cloudflare 模式可在邮箱框输入管理员邮箱；GitHub 模式留空。
+进入 **Actions → Deploy → 运行工作流（Run workflow）**，选择 `main`。Cloudflare 模式可在邮箱框输入管理员邮箱；GitHub 模式留空。
 
 工作流依次执行：
 
 1. 配置格式校验、类型检查、测试、构建和 dry-run。
-2. 发现账户及 `workers.dev` 子域；多账户 Token 才需额外指定 `CLOUDFLARE_ACCOUNT_ID`。
+2. 发现账户；有 `CUSTOM_DOMAIN` 时绑定自定义域名，否则获取 `workers.dev` 子域。多账户 Token 才需额外指定 `CLOUDFLARE_ACCOUNT_ID`。
 3. 只配置所选认证方式，按名称或显式 ID 复用 D1。
 4. 沿用旧库唯一资料所有者 ID，新库使用固定管理员 ID。
 5. 首次生成加密密钥，后续保留原值；执行数据库迁移。
 6. 通过标准输入同步所需 Secret 并部署，检查当前模式必需的 Secret 是否存在。
 7. 在运行摘要给出访问地址；GitHub 模式另给出 OAuth 回调地址。
 
-默认访问 `https://edgessh.<你的 Workers 子域>.workers.dev`。自定义域名通过可选 `CUSTOM_DOMAIN` 配置，使用 `workers.dev` 时不要填它。
+填写 `CUSTOM_DOMAIN` 后，以 `https://你的自定义域名` 作为唯一正式入口并关闭备用 `workers.dev` 入口。只有留空时，才默认访问 `https://edgessh.<你的 Workers 子域>.workers.dev`。
 
 <ScreenshotPlaceholder title="Deploy 成功记录" description="部署步骤名称可能随版本调整，请以最新运行摘要为准。" filename="05-deploy-success.png" src="/screenshots/05-deploy-success.png" alt="EdgeSSH Deploy 成功记录示例" caption="历史界面示例；当前运行成功后会在摘要给出入口与认证模式。" />
 

@@ -6,7 +6,7 @@
 - 能使用 Workers、Durable Objects 与 D1 的 Cloudflare 账户和部署 API Token。
 - 一台你有权访问的公网 SSH 服务器。
 
-应用部署不要求 Cloudflare Pages，也不要求自定义域名。默认使用账户的 `workers.dev` 地址；仅当选择 `CUSTOM_DOMAIN` 时，才需要同账户管理的域名和对应 Zone 权限。
+应用部署不要求 Cloudflare Pages。多数用户建议准备由同一 Cloudflare 账户管理的自定义域名和对应 Zone 权限；没有域名时仍可将 `CUSTOM_DOMAIN` 留空，使用账户的 `workers.dev` 地址。
 
 ## 按登录方式额外准备
 
