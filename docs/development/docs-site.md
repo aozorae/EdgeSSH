@@ -1,20 +1,21 @@
 # 部署文档站到 Cloudflare Pages
 
-VitePress 文档通过独立的 `Deploy docs` GitHub Actions workflow 发布到 Cloudflare Pages。它不会写入 EdgeSSH Worker 的 `dist/`，也不会访问 D1 或运行时 Secret。
+VitePress 文档源码保存在独立分支 `codex/docs-auth-providers`，不放入应用 `main`。目前由维护者手工构建并发布到 Cloudflare Pages，应用仓库的 main 没有 `Deploy docs` 工作流。文档不会写入 Worker 的 `dist/`，也不访问 D1 或运行时 Secret。
 
 ## 首次部署
 
-文档 workflow 复用两个部署凭据：
+在文档分支的隔离工作目录中，通过进程环境提供两个部署凭据：
 
-- GitHub Variable `CLOUDFLARE_ACCOUNT_ID`。
-- GitHub Secret `CLOUDFLARE_API_TOKEN`。
+- `CLOUDFLARE_ACCOUNT_ID`。
+- `CLOUDFLARE_API_TOKEN`（勿写入源码或命令行参数）。
 
-API Token 需要 Account `Cloudflare Pages: Edit`。可选 Variable `DOCS_PROJECT_NAME` 控制 Pages 项目名，默认 `edgessh-docs`。
+API Token 需要 Account `Cloudflare Pages: Edit`。可选环境变量 `DOCS_PROJECT_NAME` 控制项目名，默认 `edgessh-docs`。普通应用部署者不需要发布文档站。
 
 进入：
 
-```text
-Actions → Deploy docs → Run workflow
+```bash
+npm ci
+npm run deploy:docs
 ```
 
 首次运行会按名称检查 Pages 项目，不存在时创建，存在时直接复用。随后构建 `docs/.vitepress/dist` 并发布到生产分支 `main`。
@@ -35,15 +36,11 @@ Workers & Pages → edgessh-docs → Custom domains
   filename="11-pages-custom-domain.png"
 />
 
-## 自动触发
+## 维护约定
 
-推送到 `main` 且改动以下路径时，文档 workflow 自动运行：
+应用代码修改推送 main 后通过 Deploy 发布；文档源码分支单独提交推送，再执行 Pages 发布。两者各自验证，不把 Pages 构建产物或历史部署凭据合并到 main。
 
-- `docs/**`
-- `package.json` 或 `package-lock.json`
-- 文档部署 workflow 与 Pages 准备脚本
-
-应用 Worker 的 `Deploy` workflow 与文档的 `Deploy docs` workflow 使用不同并发锁和不同产物目录，不会互相覆盖。纯 `docs/**`、文档 workflow 或 Pages 准备脚本改动也被 Worker workflow 排除，不会顺带发布生产 EdgeSSH 应用。
+Pages 默认地址为 `edgessh-docs.pages.dev`。当前无需自定义域名即可阅读；不要把文档站域名误填成 SSH 应用的 `CUSTOM_DOMAIN`。
 
 ## 本地预览
 

@@ -6,7 +6,7 @@
 
 检查：
 
-- `CLOUDFLARE_ACCOUNT_ID` 是否保存为 GitHub Variable。
+- Token 是否限定到一个账户；可访问多个账户时用 `CLOUDFLARE_ACCOUNT_ID` Variable 指定。
 - `CLOUDFLARE_API_TOKEN` 是否保存为 GitHub Secret。
 - Token 的 Account Resources 是否包含该账户。
 - Token 是否过期、撤销或复制不完整。
@@ -33,13 +33,21 @@
 
 ## Action 成功，但打开后返回 503
 
-确认最新一次 `Deploy` 包含并成功执行 **Sync Worker secrets**，然后检查：
+确认最新一次 Deploy 成功，然后检查当前模式：
 
-- GitHub Actions Secrets 中存在 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD`、`ENCRYPTION_KEY`。
-- 三项名称拼写完全一致，且没有误存为 Variable。
-- Team Domain 和 AUD 来自当前自定义域名对应的 Access 应用。
+- GitHub：Actions 中已配置正确的 Client ID/Secret 与 `GITHUB_ADMIN`，Worker 中有 Client Secret。
+- Cloudflare：Worker 中已有自动获取的 Team Domain/AUD，对应实际入口的应用。
+- 两种模式都必须保留原 `ENCRYPTION_KEY`；不要为了修复 503 生成新密钥。
 
-Cloudflare Worker 的 Variables and Secrets 页面只用于核验三个名称是否已同步，不要在那里维护另一套值。
+运行时 Secret 持久保存在 Worker。无需把自动生成的值复制回 GitHub，也不要手工维护另一套配置。
+
+## GitHub 登录失败
+
+- callback 必须精确为 `https://实际入口/auth/callback`。
+- Client ID 与 Secret 必须来自同一个 OAuth App。
+- `GITHUB_ADMIN` 是个人用户名，不是邮箱或组织名；只允许这个账号登录。
+- 回调 code/state 过期时，回到首页重新登录，不重复使用旧回调 URL。
+- 若仍先弹 Access，按[切换登录方式](/deploy/switch-login)解除旧入口保护。
 
 ## 页面先登录，之后提示 Access 已失效
 

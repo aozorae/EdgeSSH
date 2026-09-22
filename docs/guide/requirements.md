@@ -1,61 +1,35 @@
 # 部署前准备
 
-先完成本页清单，再打开多个控制台操作。这样可以避免部署到一半才发现域名、权限或 SSH 目标不满足要求。
+## 两种方式都需要
 
-## 必备资源
+- GitHub 账户，用于 Fork 仓库与运行 Actions。
+- 能使用 Workers、Durable Objects 与 D1 的 Cloudflare 账户和部署 API Token。
+- 一台你有权访问的公网 SSH 服务器。
 
-- 一个 GitHub 账户，用于 Fork 仓库和运行 Actions。
-- 一个可使用 Workers、Durable Objects、D1 与 Pages 的 Cloudflare 账户。
-- 一个已经接入同一 Cloudflare 账户的域名，例如 `example.com`。
-- 一个准备分配给 EdgeSSH 的子域名，例如 `ssh.example.com`。
-- 一台你有权访问、能够从公网连接的 SSH 服务器。
-- 一个可以接收 Cloudflare Access 登录邮件的管理员邮箱，或已有的身份提供程序。
+应用部署不要求 Cloudflare Pages，也不要求自定义域名。默认使用账户的 `workers.dev` 地址；仅当选择 `CUSTOM_DOMAIN` 时，才需要同账户管理的域名和对应 Zone 权限。
 
-::: info Node.js 只影响本地开发
-只用 GitHub Actions 部署时，不需要在自己的电脑安装 Node.js。需要本地开发时，使用 Node.js 22.12.0 或更高版本。
+## 按登录方式额外准备
+
+| 选择 | 额外准备 | 不需要 |
+| --- | --- | --- |
+| `AUTH_PROVIDER=cloudflare` | 已启用 Zero Trust；管理员邮箱；Token 的 Access/IdP 权限 | GitHub OAuth App |
+| `AUTH_PROVIDER=github` | GitHub OAuth App 的 Client ID、Client Secret；管理员 GitHub 用户名 | Zero Trust、Team Domain、AUD、OTP |
+
+不想开通 Zero Trust 的用户可选择 GitHub 登录。它绕开的是 Zero Trust 的开户流程，不代表绕过 Cloudflare Workers 自身的账户要求、配额或收费规则。
+
+::: tip 不需要在本机部署
+只使用 Actions 时无需安装 Node.js。开发时才需要 Node.js 22.12.0 或更高版本。
 :::
 
-## 域名要求
+## SSH 目标
 
-正式入口应使用受 Cloudflare Access 保护的自定义域名。后续教程统一使用：
+主机必须解析到公网 IP；私有、回环、链路本地地址不允许。准备低权限 SSH 测试账号、受支持的密码或未加密 OpenSSH 私钥，并从可信渠道确认服务器指纹。
 
-```text
-ssh.example.com
-```
+## 不需要提前做
 
-替换为你自己的域名即可。填写 GitHub Variable 时只写主机名，不要带 `https://`、端口、路径或末尾斜杠。
+- 不必创建 D1 或手写数据库 ID，Action 会创建或复用。
+- 不必生成加密密钥，首次部署自动生成，后续保留。
+- Cloudflare 模式不必手工创建 Access 应用/OTP、复制 Team Domain/AUD。
+- 不要把 Secret 写入源码、Variable、截图或 Issue。
 
-## SSH 目标要求
-
-目标必须解析到公网 IP。EdgeSSH 会拒绝回环地址、私有地址、链路本地地址和其他不应从公网访问的目标，以降低 SSRF 与 DNS 重绑定风险。
-
-建议为验收准备一个专用的低权限 SSH 账号，并确认：
-
-- SSH 服务监听公网可达端口。
-- 防火墙允许 Cloudflare Workers 发起连接。
-- 你已准备密码或一个受支持的未加密 OpenSSH 私钥。
-- 你知道首次连接时应该核对的服务器指纹。
-
-## 正式部署必须填写的 6 个值
-
-这 6 项全部在 GitHub 仓库的 **Secrets and variables → Actions** 中填写。完成之前不要运行 `Deploy` workflow：
-
-| 名称 | 保存位置 | 是否敏感 |
-| --- | --- | --- |
-| `CLOUDFLARE_ACCOUNT_ID` | GitHub Actions Variable | 否 |
-| `CUSTOM_DOMAIN` | GitHub Actions Variable | 否 |
-| `CLOUDFLARE_API_TOKEN` | GitHub Actions Secret | 是 |
-| `ACCESS_TEAM_DOMAIN` | GitHub Actions Secret，自动同步为 Worker Secret | 是 |
-| `ACCESS_AUD` | GitHub Actions Secret，自动同步为 Worker Secret | 是 |
-| `ENCRYPTION_KEY` | GitHub Actions Secret，自动同步为 Worker Secret | 是 |
-
-`WORKER_NAME` 与 `D1_DATABASE_NAME` 是可选项，通常不要填写。默认名称分别是 `edgessh` 与 `edgessh-accounts`。
-
-## 不要提前做的事
-
-- 不要手动创建 D1。Action 会按名称创建或复用数据库。
-- 不要修改 `wrangler.toml` 中的全零 D1 ID。它是版本库中的安全占位值。
-- 不要把运行时 Secret 保存为 GitHub Variable，也不要写入源码、`wrangler.toml` 或 Issue。
-- 不要先生成多个 `ENCRYPTION_KEY`。首次确定后要长期复用同一个值。
-
-准备完成后，进入[GitHub Actions 完整部署流程](/deploy/actions)。
+下一步：[GitHub Actions 完整部署流程](/deploy/actions)。

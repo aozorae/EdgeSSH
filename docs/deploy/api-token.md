@@ -18,7 +18,10 @@
 | --- | --- | --- |
 | Account | Workers Scripts: Edit | 创建或更新 EdgeSSH Worker |
 | Account | D1: Edit | 查找、创建 D1 并执行 migration |
-| Zone | Workers Routes: Edit | 绑定 `CUSTOM_DOMAIN` |
+| Account | Account Settings: Read | 自动发现账户 |
+| Account | Access: Apps and Policies: Edit | **仅 cloudflare 模式**：创建/复用 Access 应用和策略 |
+| Account | Access: Organizations, Identity Providers, and Groups: Edit | **仅 cloudflare 模式**：读取团队域、创建/复用 OTP |
+| Zone | Workers Routes: Edit、Zone: Read | **仅自定义域名**：绑定 `CUSTOM_DOMAIN` |
 
 Cloudflare 控制台的权限名称可能随界面调整。判断标准是：Token 能部署 Worker、管理目标账户的 D1，并为目标 Zone 配置 Worker 自定义域名。
 
@@ -44,7 +47,7 @@ Token 创建完成后，只会完整显示一次：
 
 不要把 Token 存为普通 Variable。也不要把 Token 写入 `.env`、`.dev.vars`、`wrangler.toml`、README 或截图。
 
-API Token 只是正式部署的 6 项必填配置之一。创建完成后回到[GitHub Actions 完整部署流程](/deploy/actions#开始前必须填写的-6-项)，将 2 个 Variable 与 4 个 Secret 一次配置完整。
+GitHub 模式不需要任何 Access/IdP 权限。创建完成后回到[部署流程](/deploy/actions)，只填写所选模式的参数。仅使用 workers.dev 时无需自定义域名的 Zone 权限。
 
 ## 验证与排错
 
@@ -59,4 +62,4 @@ Action 能部署 Worker、但无法创建 D1 时，通常是缺少 Account `D1: 
 
 ## 文档站 Pages 权限
 
-仓库的 `Deploy docs` workflow 会把 VitePress 静态产物发布到独立 Cloudflare Pages 项目。若同一个 Token 也用于文档站，请额外确认它具备 Account `Cloudflare Pages: Edit`。文档项目默认名为 `edgessh-docs`，不会访问 EdgeSSH 的 D1 或 Worker Secret。
+维护者手工发布文档站时还需要 Account `Cloudflare Pages: Edit`；普通 EdgeSSH 部署用户不需要此权限。文档源码单独维护，不在应用 `main`，也没有主分支 `Deploy docs` 工作流。

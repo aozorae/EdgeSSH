@@ -4,7 +4,7 @@ layout: home
 hero:
   name: EdgeSSH
   text: 从 Fork 到上线，可逐项核对
-  tagline: 使用 GitHub Actions 创建或复用 Cloudflare 资源。无需手写 D1 ID，也无需在本地执行生产部署命令。
+  tagline: Cloudflare Access 或原生 GitHub 登录，二选一。填写对应变量，Action 自动部署；切换登录方式，主机资料不搬家。
   actions:
     - theme: brand
       text: 使用 Actions 部署
@@ -32,22 +32,22 @@ hero:
     <div>
       <span>01</span>
       <strong>准备 Cloudflare</strong>
-      <p>接入域名，创建最小权限 API Token，并配置 Access 应用。</p>
+      <p>创建 Workers/D1 部署 Token。自定义域名可选，默认使用 workers.dev。</p>
     </div>
     <div>
       <span>02</span>
-      <strong>填写 GitHub</strong>
-      <p>保存账户 ID、自定义域名与四项 Secret，名称通常保持默认。</p>
+      <strong>选择登录方式</strong>
+      <p>AUTH_PROVIDER 二选一：Access 填管理员邮箱，GitHub 填 OAuth App 与管理员账号。</p>
     </div>
     <div>
       <span>03</span>
       <strong>运行 Deploy</strong>
-      <p>Action 自动检查项目、创建或复用 D1、执行迁移并发布 Worker。</p>
+      <p>自动配置所选认证、复用 D1、生成并保留密钥，执行迁移和部署。</p>
     </div>
     <div>
       <span>04</span>
-      <strong>验证自动同步</strong>
-      <p>确认 Action 已同步 Access 参数与固定加密密钥，再完成验收。</p>
+      <strong>登录并验收</strong>
+      <p>只有指定管理员可以访问；切换方式仍保留原有主机与凭据。</p>
     </div>
   </div>
 </section>
@@ -57,7 +57,7 @@ hero:
     <h2>先明确边界，再保存凭据</h2>
   </div>
   <div>
-    <p>EdgeSSH 面向个人管理员，不提供本地注册或匿名入口。Cloudflare Access 负责身份认证，Worker 在应用内再次校验 Access JWT。它不是端到端加密：Worker 在建立 SSH 会话时会处理明文凭据，因此 Cloudflare 账户和 Worker Secret 管理权限都属于信任边界。</p>
+    <p>EdgeSSH 面向单管理员，不提供本地注册或匿名 SSH。Cloudflare 模式验证 Access JWT，GitHub 模式验证指定账号并使用签名会话，两者不同时生效。它不是端到端加密：Worker 建立 SSH 会话时会处理明文凭据，因此云账户、部署权限和 Secret 都属于信任边界。</p>
     <a class="home-link" href="/deploy/actions">开始完整部署</a>
   </div>
 </section>

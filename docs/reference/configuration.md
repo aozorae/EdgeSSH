@@ -1,56 +1,43 @@
 # 配置项
 
-EdgeSSH 的配置分为 GitHub Actions 部署输入、由 workflow 同步的 Cloudflare Worker Secret、普通变量和资源 binding。把它们放在正确位置，才能避免泄漏或同名冲突。
+唯一用户配置入口：GitHub **Settings → Secrets and variables → Actions**。根据 `AUTH_PROVIDER` 只填一组认证参数。
 
-## 正式部署必填
+## 必填与按模式必填
 
-下面 6 项全部保存在 GitHub Actions。2 个 Variable 可见，4 个 Secret 保存后不再显示：
-
-| 名称 | 类型 | 说明 |
+| 名称 | GitHub 类型 | 用途 |
 | --- | --- | --- |
-| `CLOUDFLARE_ACCOUNT_ID` | Variable | 目标 Cloudflare 账户 |
-| `CUSTOM_DOMAIN` | Variable | 受 Access 保护的自定义域名纯主机名 |
-| `CLOUDFLARE_API_TOKEN` | Secret | Workers、D1、Zone 部署凭据 |
-| `ACCESS_TEAM_DOMAIN` | Secret | 同步为 Worker Secret |
-| `ACCESS_AUD` | Secret | 同步为 Worker Secret |
-| `ENCRYPTION_KEY` | Secret | 同步为 Worker Secret，后续部署必须保持不变 |
+| `AUTH_PROVIDER` | Variable | `cloudflare` 或 `github`，默认 `cloudflare` |
+| `CLOUDFLARE_API_TOKEN` | Secret | 两种模式都需要的云资源部署凭据 |
+| `ADMIN_EMAIL` | Variable，兼容 Secret | Cloudflare 模式管理员邮箱；Run workflow 输入优先 |
+| `GITHUB_CLIENT_ID` | Variable | 仅 GitHub 模式，OAuth App 的 Client ID |
+| `GITHUB_CLIENT_SECRET` | Secret | 仅 GitHub 模式，同一 OAuth App 的 Client Secret |
+| `GITHUB_ADMIN` | Variable | 仅 GitHub 模式，唯一管理员的个人 GitHub 用户名 |
 
-## 可选 GitHub Actions Variable
+## 可选部署配置
 
-| 名称 | 默认值 | 说明 |
+| 名称 | 类型 | 默认与说明 |
 | --- | --- | --- |
-| `WORKER_NAME` | `edgessh` | Worker 名称 |
-| `D1_DATABASE_NAME` | `<WORKER_NAME>-accounts` | D1 名称 |
-| `DOCS_PROJECT_NAME` | `edgessh-docs` | VitePress Pages 项目名，只供 `Deploy docs` 使用 |
+| `CLOUDFLARE_ACCOUNT_ID` | Variable，兼容 Secret | 自动发现唯一账户；多账户 Token 才需指定 |
+| `WORKER_NAME` | Variable | `edgessh` |
+| `D1_DATABASE_NAME` | Variable | `<Worker 名>-accounts` |
+| `D1_DATABASE_ID` | Variable | 指定已有 D1；不存在时停止，不另建空库替代 |
+| `CUSTOM_DOMAIN` | Variable，兼容 Secret | 如 `ssh.example.com`；Secret 优先；使用 workers.dev 留空 |
+| `ACCESS_IDP_IDS` | Variable | 仅 Cloudflare 模式新建应用：逗号分隔的已有 IdP UUID |
+| `ENCRYPTION_KEY` | Secret，仅高级恢复/首次自备 | 32 字节 Base64；已有 Worker 密钥不会被覆盖 |
 
-## Worker Secret
+## 自动生成的 Worker 配置
 
-| 名称 | 必需 | 格式 |
-| --- | --- | --- |
-| `ACCESS_TEAM_DOMAIN` | 是 | `my-team.cloudflareaccess.com`，无协议或路径 |
-| `ACCESS_AUD` | 是 | 当前 Self-hosted Access 应用的 AUD Tag |
-| `ENCRYPTION_KEY` | 是 | 解码后 32 字节的标准 Base64 |
+- 共同 Secret：`ENCRYPTION_KEY`。
+- Cloudflare 模式 Secret：`ACCESS_TEAM_DOMAIN`、`ACCESS_AUD`。
+- GitHub 模式 Secret：从 Actions 同步 `GITHUB_CLIENT_SECRET`。
+- 普通变量：`AUTH_PROVIDER`、`APP_ORIGIN`、`ADMIN_ACCOUNT_ID`；GitHub 模式还有 `GITHUB_CLIENT_ID`、解析得到的 `GITHUB_ADMIN_ID`。
 
-生产 Secret 在 GitHub Actions Secrets 中配置，由 `Deploy` workflow 经标准输入同步到 Cloudflare Worker。Worker 的 **Variables and Secrets** 页面只用于核验同步结果；不要在那里维护另一套值，也不要把 Secret 写入 `wrangler.toml` 或源码。
+这些自动配置无需再去 Worker 控制台维护一遍。运行时 Secret 不写源码、普通变量或临时配置。旧模式的 Secret 可能保留，但运行时不读取另一种模式的认证凭据。
 
-## 普通变量
+`ADMIN_ACCOUNT_ID` 是资料归属，不是认证开关；只在外部身份验证成功后使用。切换登录方式不改变它。
 
-| 名称 | 默认值 | 范围 | 说明 |
-| --- | --- | --- | --- |
-| `CONNECT_TIMEOUT_MS` | `10000` | `2000` 至 `30000` | TCP 建连超时，单位毫秒 |
+## 绑定与本地开发
 
-## 资源 binding
+`DB` 是 D1 binding，`SSH_SESSIONS` 是 Durable Object binding，`ASSETS` 是静态资源 binding，不要创建同名普通变量。
 
-| 名称 | 类型 | 说明 |
-| --- | --- | --- |
-| `DB` | D1 | 加密主机资料与 migration 状态 |
-| `SSH_SESSIONS` | Durable Object | 每会话 SSH 客户端 |
-| `ASSETS` | Static Assets | Vite 构建后的 EdgeSSH 前端 |
-
-这些 binding 由 Wrangler 配置生成，不要在 Variables and Secrets 中创建同名值。
-
-## 本地变量
-
-本地开发把 `.env.example` 复制为 `.dev.vars`，再填入开发值。`.dev.vars` 已被 Git 忽略，不应提交。
-
-本地仍执行 Access JWT 校验，没有匿名开发绕过开关。
+`CONNECT_TIMEOUT_MS` 默认 `10000`，范围 2000–30000 毫秒。本地将 `.env.example` 复制为 `.dev.vars`，仅填所选模式参数，不提供匿名绕过。

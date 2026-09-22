@@ -10,10 +10,11 @@
 npm run check
 ```
 
-如果修改了文档，再启动本地预览检查桌面和移动端：
+如果修改了文档，在独立文档源码分支启动预览并构建检查；应用 main 不包含文档构建命令：
 
 ```bash
 npm run docs:dev
+npm run docs:build
 ```
 
 ## 变更范围
@@ -27,6 +28,8 @@ npm run docs:dev
 ## 测试真实功能
 
 涉及 SSH、SFTP、进程面板或操作系统探测时，使用你有权访问的测试服务器。Pull Request 中明确写出已验证的范围；没有真实目标时，不要声称真实连接已通过。
+
+涉及认证时，应覆盖所选模式互斥、未授权账号拒绝、OAuth state/PKCE、Cookie 到期与退出，以及切换后旧资料可解密。模拟 OAuth API 测试不能替代真实 GitHub 授权验收。
 
 ## 安全报告
 

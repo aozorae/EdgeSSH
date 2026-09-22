@@ -5,12 +5,12 @@ EdgeSSH 让个人管理员通过浏览器访问 SSH，但它不会把 Worker 变
 ## 请求路径
 
 ```text
-Cloudflare Access
-  │ 注入并签名 Access JWT
+Cloudflare Access 或 GitHub OAuth（二选一）
+  │ 验证外部身份
   ▼
 Worker
-  ├─ 校验签名、issuer、audience、有效期、sub 与邮箱
-  ├─ API：按 Access sub 读取当前身份的数据
+  ├─ 校验所选方式的 JWT / 签名 Cookie
+  ├─ API：按固定管理员 ID 读取同一份资料
   ├─ D1：读取或写入 AES-256-GCM 密文
   └─ 一次性会话票据
         ▼
@@ -24,7 +24,7 @@ Durable Object
 
 ## 身份边界
 
-EdgeSSH 不信任单独的邮箱请求头。Worker 使用 `jose` 验证 `Cf-Access-Jwt-Assertion`，并检查：
+Cloudflare 模式不信任单独的邮箱请求头。Worker 使用 `jose` 验证 `Cf-Access-Jwt-Assertion`，并检查：
 
 - RS256 签名。
 - Issuer 是否属于配置的 Team Domain。
@@ -34,9 +34,13 @@ EdgeSSH 不信任单独的邮箱请求头。Worker 使用 `jose` 验证 `Cf-Acce
 
 主机 API、会话票据和各类 WebSocket 附着都要求有效身份。
 
+GitHub 模式使用随机 state 与 PKCE S256，向 GitHub 核验当前用户，匹配部署时解析的管理员数字 ID，再签发 Secure/HttpOnly/SameSite=Lax Cookie（8 小时）。会话校验签名、issuer、audience、有效期与管理员 ID；不信任 Access Cookie，也不保存 GitHub access token。Cloudflare 模式不接受 GitHub 会话。
+
+会话是无服务端存储的签名 Cookie。退出清除当前浏览器 Cookie；若 Cookie 被窃取，单次退出不会远程吊销副本，它会在到期后失效。请保护浏览器和部署凭据。
+
 ## 数据加密
 
-每条主机记录绑定 Access `sub`。Worker 使用 AES-256-GCM 加密完整主机资料，包括地址、密码或私钥、服务器指纹和位置。
+每条主机记录绑定固定管理员 ID。旧库沿用唯一原所有者，新库使用 `admin`；切换登录来源不重写资料或密文。Worker 使用 AES-256-GCM 加密完整主机资料，包括地址、密码或私钥、服务器指纹和位置。
 
 - 每次加密使用随机 96-bit IV。
 - AAD 绑定账户和记录 ID。
@@ -66,7 +70,7 @@ Worker 会解析目标主机并拒绝私人、回环、链路本地等非公网�
 
 ## 操作建议
 
-- Access 策略只允许明确管理员身份。
+- Access 策略或 GitHub 管理员配置只允许明确管理员身份。
 - SSH 使用低权限专用账号或密钥。
 - 定期撤销不再使用的 Cloudflare Token。
 - 不在日志、截图、Issue 中泄露凭据或 Access 信息。

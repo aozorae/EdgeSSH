@@ -14,9 +14,9 @@ EdgeSSH 是运行在 Cloudflare Workers 上的个人 SSH 工作台。部署完�
   └─ 进程与系统信息
         │ HTTPS / WebSocket
         ▼
-Cloudflare Access → Worker → Durable Object → TCP Socket → SSH 服务器
+所选登录方式 → Worker → Durable Object → TCP Socket → SSH 服务器
                          │
-                         └─ D1：每个身份独立的加密主机资料
+                         └─ D1：单管理员的加密主机资料
 ```
 
 浏览器不会直接连接 SSH 服务器。每个连接会话由 Durable Object 隔离，Worker 通过 Cloudflare TCP Sockets 连接目标的公网 SSH 端口。
@@ -34,7 +34,7 @@ Cloudflare Access → Worker → Durable Object → TCP Socket → SSH 服务器
 
 ## 凭据怎样保存
 
-主机资料通过 AES-256-GCM 加密后写入 D1。密文绑定 Access 用户身份与记录 ID，列表接口不会返回密码或私钥；建立连接时才在 Worker 内解密，并只把必要数据放入当前会话。
+主机资料通过 AES-256-GCM 加密后写入 D1。密文绑定固定管理员 ID 与记录 ID，切换 Access/GitHub 不改变归属；列表接口不会返回密码或私钥，建立连接时才解密。
 
 ::: warning 这不是端到端加密
 Worker 是实际的 SSH 客户端，会在会话内处理明文凭据。只把 EdgeSSH 部署到你信任的 Cloudflare 账户，并为 SSH 使用最小权限账号或密钥。

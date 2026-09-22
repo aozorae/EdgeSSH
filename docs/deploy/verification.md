@@ -2,12 +2,12 @@
 
 把“网页能打开”当作开始，而不是结束。下面的检查从身份边界到真实 SSH 功能逐步推进，便于在出现问题时定位到正确层级。
 
-## 1. Access 入口
+## 1. 所选登录入口
 
-- 在未登录浏览器中访问正式域名，应先出现 Cloudflare Access。
-- 使用不在 Allow 策略中的邮箱，不能进入 EdgeSSH。
-- 使用管理员邮箱登录后，应进入主机总览。
-- 正式使用始终从自定义域名进入，不把 `workers.dev` 地址分享为入口。
+- Cloudflare 模式：未登录时先出现 Access，不在 Allow 策略内的邮箱不能进入。
+- GitHub 模式：首页点击「登录」前往 GitHub，非 `GITHUB_ADMIN` 账号被拒绝；不应再出现 Access。
+- 管理员登录后能读取主机列表；未登录请求主机/会话 API 被拒绝。
+- 使用 Action 摘要给出的入口，既可以是 workers.dev，也可以是自定义域名。
 
 ## 2. 账号 API
 
@@ -17,9 +17,11 @@
 https://ssh.example.com/api/auth/me
 ```
 
-把域名替换为你的实际入口。应返回当前 Access 身份的受控信息，而不是 401、503 或 HTML 登录页。
+把域名替换为实际入口。应返回当前管理员信息与所选 provider，而不是 401、503 或 HTML 登录页。
 
-若返回 503，优先检查三个 GitHub Actions Secret 是否已由最新一次 `Deploy` 成功同步。若返回身份失效，检查 Team Domain、AUD 与当前 Access 应用是否一致。
+若返回 503，检查当前模式的必需配置和 Deploy 结果。GitHub 模式检查 OAuth App 与管理员，Cloudflare 模式检查对应 Access 应用。
+
+测试切换模式时，确认使用同一 Worker/D1/密钥后，原主机仍可读取及连接，不要新建空库冒充迁移成功。
 
 ## 3. 主机资料
 
