@@ -86,7 +86,7 @@ export class Dashboard {
           <footer class="home-footer"><span>EdgeSSH / Private workspace</span><span>首次保存时查询公网 IP 位置，失败时仍可连接。</span><a href="https://mappojs.com/" target="_blank" rel="noopener noreferrer">地图数据与灵感来自 Mappo.js</a></footer>
         </main>
       </div>
-      <dialog class="host-dialog" aria-labelledby="host-dialog-title">
+      <dialog id="host-editor-dialog" class="host-dialog" aria-labelledby="host-dialog-title">
         <form id="cloud-host-form" autocomplete="off">
           <div class="dialog-heading"><div><p class="home-eyebrow">ENCRYPTED HOST</p><h2 id="host-dialog-title">添加主机</h2></div><button type="button" class="home-button close-dialog" aria-label="关闭">×</button></div>
           <p class="dialog-intro">保存到你的云端主机库，不会写入浏览器本地存储。</p>
@@ -115,7 +115,7 @@ export class Dashboard {
     this.get('.home-layout').append(this.actions.files.root);
     this.get('.home-layout').append(this.actions.snippets.page);
     this.get('.home-layout').append(this.forwarding.root);
-    this.dialog = this.get<HTMLDialogElement>('.host-dialog');
+    this.dialog = this.get<HTMLDialogElement>('#host-editor-dialog');
     this.form = this.get<HTMLFormElement>('#cloud-host-form');
     this.get('#account-action').addEventListener('click', async (event) => {
       if (!this.authenticated) return;
