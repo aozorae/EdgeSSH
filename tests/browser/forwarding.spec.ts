@@ -140,7 +140,11 @@ test('离开转发页后保持 8 分钟，返回页面可查看并手动停止',
   await page.locator('#rail-overview').click();
   await expect.poll(() => closed[0]).toBe(true);
   await page.locator('#rail-forward').click();
-  await expect(page.locator('[data-status]')).toContainText('正在保持 127.0.0.1:8080');
+  const retainedStatus = page.locator('[data-status]');
+  await expect(retainedStatus).toContainText('正在保持 127.0.0.1:8080');
+  await expect(retainedStatus).toHaveClass(/is-retained/);
+  await expect(retainedStatus).toHaveCSS('font-weight', '700');
+  await expect(retainedStatus).toHaveCSS('border-left-style', 'solid');
   await expect(page.locator('[data-stop]')).toBeEnabled();
   await page.locator('[data-stop]').click();
   await expect(page.locator('[data-stop]')).toBeDisabled();

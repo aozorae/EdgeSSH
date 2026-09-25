@@ -109,7 +109,11 @@ export class ForwardPage {
   }
 
   private get<T extends HTMLElement>(selector: string): T { return this.root.querySelector<T>(selector)!; }
-  private message(text: string): void { this.get('[data-status]').textContent = text; }
+  private message(text: string, retained = false): void {
+    const status = this.get('[data-status]');
+    status.textContent = text;
+    status.classList.toggle('is-retained', retained);
+  }
 
   setHosts(hosts: CloudHost[]): void {
     this.hosts = hosts;
@@ -278,7 +282,7 @@ export class ForwardPage {
     this.busy = false;
     this.rememberSession();
     this.scheduleRetention(Date.now() + FORWARD_RETENTION_MS);
-    this.message(`后台保持 127.0.0.1:${this.port.value} 至 ${new Date(this.retentionDeadline!).toLocaleTimeString()}，重新进入可继续查看或停止。`);
+    this.message(`后台保持 127.0.0.1:${this.port.value} 至 ${new Date(this.retentionDeadline!).toLocaleTimeString()}，重新进入可继续查看或停止。`, true);
     this.render();
   }
 
@@ -313,7 +317,7 @@ export class ForwardPage {
       this.trust.checked = status.mode === 'trusted';
       this.ready = true;
       this.scheduleRetention(status.expiresAt);
-      this.message(`正在保持 127.0.0.1:${status.port} 至 ${new Date(status.expiresAt).toLocaleTimeString()}，可重新打开预览或立即停止。`);
+      this.message(`正在保持 127.0.0.1:${status.port} 至 ${new Date(status.expiresAt).toLocaleTimeString()}，可重新打开预览或立即停止。`, true);
     } catch {
       if (generation !== this.restoreGeneration) return;
       localStorage.removeItem(FORWARD_SESSION_STORAGE_KEY);
