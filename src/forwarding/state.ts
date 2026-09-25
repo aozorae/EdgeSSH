@@ -13,9 +13,17 @@ interface Grant {
   token: string;
   expires: number;
   base: string;
+  mode: 'trusted' | 'isolated';
 }
 
-/** 授权仅存在 SSH 会话内存里；DO 重启、断线或显式停止都会让预览 Cookie 失效。 */
+export interface ForwardingStatus {
+  active: boolean;
+  port?: number;
+  mode?: 'trusted' | 'isolated';
+  expiresAt?: number;
+}
+
+/** 授权仅存在 SSH 会话内存里；DO 重启、远端 SSH 断线或显式停止都会让预览 Cookie 失效。 */
 export class ForwardingState {
   private grant?: Grant;
   private timer?: ReturnType<typeof setTimeout>;
@@ -34,7 +42,27 @@ export class ForwardingState {
     session?.close(true);
   }
 
-  async create(session: SSHSession, port: number, origin: string, sessionId: string, mode: 'trusted' | 'isolated' = 'isolated'): Promise<Response> {
+  owns(session: SSHSession): boolean {
+    return this.grant?.session === session && session.isForwardReady();
+  }
+
+  currentSession(): SSHSession | undefined {
+    return this.grant?.session;
+  }
+
+  status(expiresAtLimit?: number): ForwardingStatus {
+    const grant = this.grant;
+    if (!grant || !grant.session.isForwardReady() || grant.expires <= Date.now()) return { active: false };
+    return {
+      active: true,
+      port: grant.port,
+      mode: grant.mode,
+      expiresAt: Math.min(grant.expires, expiresAtLimit ?? grant.expires),
+    };
+  }
+
+  async create(session: SSHSession, port: number, origin: string, sessionId: string,
+    mode: 'trusted' | 'isolated' = 'isolated', expiresAtLimit?: number): Promise<Response> {
     this.clear();
     const revision = this.revision;
     // 创建时先探测 direct-tcpip 权限和监听端口，避免给用户一个必定失败的链接。
@@ -43,8 +71,8 @@ export class ForwardingState {
     if (revision !== this.revision || !session.isForwardReady()) return previewError('转发已取消。', 409);
     const grant: Grant = {
       session, port, origin, launchToken: crypto.randomUUID(), launchExpires: Date.now() + LAUNCH_TTL_MS,
-      token: crypto.randomUUID(), expires: Date.now() + FORWARD_TTL_MS,
-      base: mode === 'trusted' ? trustedBase(sessionId) : '',
+      token: crypto.randomUUID(), expires: Math.min(Date.now() + FORWARD_TTL_MS, expiresAtLimit ?? Number.MAX_SAFE_INTEGER),
+      base: mode === 'trusted' ? trustedBase(sessionId) : '', mode,
     };
     this.grant = grant;
     this.timer = setTimeout(() => this.stop(), FORWARD_TTL_MS);

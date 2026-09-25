@@ -14,19 +14,32 @@ async function forwardingFixture(page: Page, previewAvailable = true, noHosts = 
   const calls: Array<Record<string, unknown>> = [];
   const sockets: WebSocketRoute[] = [];
   const closed: boolean[] = [];
+  let active = false;
+  let retainedExpiresAt = 0;
   await page.route('**/api/**', async (route) => {
-    const path = new URL(route.request().url()).pathname;
+    const requestURL = new URL(route.request().url());
+    const path = requestURL.pathname;
     if (path === '/api/auth/me') return route.fulfill({ json: { account: { username: 'Administrator' }, provider: 'cloudflare' } });
     if (path === '/api/hosts') return route.fulfill({ json: { hosts: noHosts ? [] : [host] } });
     if (path.endsWith('/credentials')) return route.fulfill({ json: { password: 'test-only-password' } });
     if (path === '/api/session') return route.fulfill({ json: { ticket: 'test-ticket', sessionId } });
     if (path === '/api/forwarding' && route.request().method() === 'GET') {
+      if (requestURL.searchParams.has('session')) {
+        return route.fulfill({ json: active
+          ? { active: true, port: 8080, mode: 'trusted', expiresAt: retainedExpiresAt || Date.now() + 480000 }
+          : { active: false } });
+      }
       return route.fulfill({ json: { previewAvailable } });
     }
     if (path === '/api/forwarding' && route.request().method() === 'POST') {
       calls.push({ type: 'forwarding', body: route.request().postDataJSON() });
+      active = true;
       const mode = route.request().postDataJSON().mode;
       return route.fulfill({ json: { url: mode === 'isolated' ? 'https://isolated.example.net/start#xxx' : trustedURL, expiresAt: Date.now() + 3600000 } });
+    }
+    if (path === '/api/forwarding' && route.request().method() === 'DELETE') {
+      active = false; calls.push({ type: 'delete' });
+      return route.fulfill({ json: { ok: true } });
     }
     return route.fulfill({ json: {} });
   });
@@ -34,7 +47,7 @@ async function forwardingFixture(page: Page, previewAvailable = true, noHosts = 
     sockets.push(ws);
     const index = sockets.length - 1;
     closed[index] = false;
-    ws.onClose(() => { closed[index] = true; void ws.close(); });
+    ws.onClose(() => { closed[index] = true; retainedExpiresAt = Date.now() + 480000; void ws.close(); });
     ws.onMessage((raw) => {
       const message = JSON.parse(String(raw));
       calls.push(message);
@@ -120,15 +133,30 @@ test('连接转发发送 forward 协议并提供弹窗拦截回退链接，停�
   await page.screenshot({ path: testInfo.outputPath('forwarding-desktop.png'), fullPage: true });
 });
 
-test('离开总览会关闭独立转发 WebSocket，返回页面保持未连接', async ({ page }) => {
-  const { sockets, closed } = await forwardingFixture(page);
+test('离开转发页后保持 8 分钟，返回页面可查看并手动停止', async ({ page }) => {
+  const { calls, sockets, closed } = await forwardingFixture(page);
   await startForward(page);
   await expect.poll(() => sockets.length).toBe(1);
   await page.locator('#rail-overview').click();
   await expect.poll(() => closed[0]).toBe(true);
   await page.locator('#rail-forward').click();
-  await expect(page.locator('[data-status]')).not.toContainText('已转发');
+  await expect(page.locator('[data-status]')).toContainText('正在保持 127.0.0.1:8080');
+  await expect(page.locator('[data-stop]')).toBeEnabled();
+  await page.locator('[data-stop]').click();
   await expect(page.locator('[data-stop]')).toBeDisabled();
+  await expect.poll(() => calls.some((call) => call.type === 'delete')).toBe(true);
+});
+
+test('刷新后可从短期会话句柄恢复正在保持的转发', async ({ page }) => {
+  const { sockets } = await forwardingFixture(page);
+  await startForward(page);
+  await expect.poll(() => sockets.length).toBe(1);
+  await page.reload();
+  await page.locator('#rail-forward').click();
+  await expect(page.locator('[data-status]')).toContainText('正在保持 127.0.0.1:8080');
+  await expect(page.locator('.forward-page input[name="port"]')).toHaveValue('8080');
+  await expect(page.locator('.forward-page select[name="mode"]')).toHaveValue('trusted');
+  await page.locator('[data-stop]').click();
 });
 
 test('空主机禁用连接按钮且桌面与 375px 手机布局没有横向溢出', async ({ page }, testInfo) => {

@@ -25,6 +25,17 @@ test('GET reports preview availability only when configured', async () => {
   assert.deepEqual(await (await forwardingRoute(new Request('https://main.test/api/forward'), makeEnv('https://preview.test').env, 'acct')).json(), { previewAvailable: true });
 });
 
+test('GET with a session queries the owned Durable Object', async () => {
+  const state = makeEnv();
+  const response = await forwardingRoute(new Request(`https://main.test/api/forward?session=${sessionId}`), state.env, 'acct');
+  assert.equal(response.status, 200);
+  assert.equal(state.calls.length, 1);
+  assert.equal(state.calls[0].id, sessionId);
+  assert.equal(state.calls[0].request.method, 'GET');
+  assert.equal(state.calls[0].request.headers.get('x-account-id'), 'acct');
+  assert.equal((await forwardingRoute(new Request('https://main.test/api/forward?session=bad'), state.env, 'acct')).status, 400);
+});
+
 test('trusted POST requires explicit confirmation and forwards trusted mode', async () => {
   const missing = makeEnv();
   const rejected = await forwardingRoute(new Request(`https://main.test/api/forward?session=${sessionId}`, {
@@ -77,7 +88,12 @@ test('trusted forwarding validates session, strips token, derives path, and pres
 });
 
 function fakeSession() {
-  return { isForwardReady: () => true, openForward: async () => ({ close: async () => {} }) } as never;
+  let ready = true;
+  return {
+    isForwardReady: () => ready,
+    openForward: async () => ({ close: async () => {} }),
+    close: () => { ready = false; },
+  } as never;
 }
 
 test('ForwardingState rejects cross-mode grants and clear invalidates both paths', async () => {
@@ -90,4 +106,17 @@ test('ForwardingState rejects cross-mode grants and clear invalidates both paths
   state.clear();
   assert.equal((await state.trusted(new Request('https://main.test/'))).status, 410);
   assert.equal((await state.preview(new Request('https://main.test/'))).status, 410);
+});
+
+test('ForwardingState reports restorable metadata and applies the retention deadline', async () => {
+  const state = new ForwardingState();
+  const session = fakeSession();
+  const retainedUntil = Date.now() + 8 * 60_000;
+  await state.create(session, 8080, 'https://main.test', sessionId, 'trusted', retainedUntil);
+  assert.equal(state.owns(session), true);
+  assert.deepEqual(state.status(retainedUntil), {
+    active: true, port: 8080, mode: 'trusted', expiresAt: retainedUntil,
+  });
+  state.stop();
+  assert.deepEqual(state.status(), { active: false });
 });

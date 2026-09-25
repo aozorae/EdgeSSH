@@ -4,7 +4,7 @@ import { assertPublicTarget, toSocketHostname } from './security';
 import { createTicket, verifyTicket } from './security';
 import { SSHSession } from './session';
 import { ForwardingState } from '../forwarding/state';
-import { previewError } from '../forwarding/security';
+import { FORWARD_RETENTION_MS, previewError } from '../forwarding/security';
 
 interface MainAttachment { role: 'main'; phase: 'waiting' | 'connecting' | 'connected' }
 interface SFTPAttachment { role: 'sftp'; phase: 'connected' }
@@ -27,6 +27,7 @@ type AuxiliaryAttachToken = SFTPAttachToken;
 const TICKET_STORAGE_KEY = 'session-ticket';
 const SFTP_ATTACH_TOKEN_TTL_MS = 10 * 60 * 1000;
 const SFTP_ATTACH_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+interface RetainedForwarding { expiresAt: number; timeout: ReturnType<typeof setTimeout> }
 
 export class SSHSessionDO implements DurableObject {
   private readonly state: DurableObjectState;
@@ -45,6 +46,7 @@ export class SSHSessionDO implements DurableObject {
   private readonly processSessions = new Map<WebSocket, SSHSession>();
   private readonly processOwners = new Map<WebSocket, WebSocket>();
   private readonly processWebSocketsByMain = new Map<WebSocket, Set<WebSocket>>();
+  private readonly retainedForwarding = new Map<WebSocket, RetainedForwarding>();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -88,8 +90,13 @@ export class SSHSessionDO implements DurableObject {
     }
     if (url.pathname === '/forward-http') return this.forwarding.trusted(request);
     if (url.pathname === '/forward') {
+      if (request.method === 'GET') {
+        return Response.json(this.forwarding.status(this.forwardingRetentionDeadline()), {
+          headers: { 'Cache-Control': 'no-store' },
+        });
+      }
       if (request.method === 'DELETE') {
-        this.forwarding.stop();
+        this.stopForwarding();
         return Response.json({ ok: true }, { headers: { 'Cache-Control': 'no-store' } });
       }
       if (request.method !== 'POST') return previewError('Method not allowed', 405);
@@ -99,7 +106,10 @@ export class SSHSessionDO implements DurableObject {
       const origin = request.headers.get('x-preview-origin');
       if (!Number.isInteger(port) || port < 1 || port > 65535 || !origin
         || (mode !== 'trusted' && mode !== 'isolated')) return previewError('Invalid forwarding configuration', 400);
-      try { return await this.forwarding.create(session, port, origin, this.state.id.toString(), mode); }
+      try {
+        return await this.forwarding.create(session, port, origin, this.state.id.toString(), mode,
+          this.forwardingRetentionDeadline(session));
+      }
       catch { return previewError('远端端口不可达或 SSH 服务未允许 TCP 转发。', 502); }
     }
     if (url.pathname === '/sftp') return this.attachSFTP(request);
@@ -439,8 +449,21 @@ export class SSHSessionDO implements DurableObject {
     this.deadlines.delete(ws);
   }
 
-  private cleanup(ws: WebSocket): void {
-    this.forwarding.clear();
+  private cleanup(ws: WebSocket, force = false): void {
+    const session = this.sessions.get(ws);
+    if (!force && session && this.forwarding.owns(session)) {
+      if (!this.retainedForwarding.has(ws)) {
+        // 管理页断开不等于用户停止；短暂保留底层 SSH，允许刷新或切页后回来主动关闭。
+        const expiresAt = Date.now() + FORWARD_RETENTION_MS;
+        const timeout = setTimeout(() => this.cleanup(ws, true), FORWARD_RETENTION_MS);
+        this.retainedForwarding.set(ws, { expiresAt, timeout });
+      }
+      return;
+    }
+    const retained = this.retainedForwarding.get(ws);
+    if (retained) clearTimeout(retained.timeout);
+    this.retainedForwarding.delete(ws);
+    if (!session || this.forwarding.currentSession() === session) this.forwarding.clear();
     this.clearDeadline(ws);
     const token = this.sftpTokenByMainWebSocket.get(ws);
     if (token) this.deleteSFTPAttachToken(token);
@@ -470,6 +493,23 @@ export class SSHSessionDO implements DurableObject {
     }
     this.sessions.get(ws)?.close(true);
     this.sessions.delete(ws);
+  }
+
+  private forwardingRetentionDeadline(session = this.forwarding.currentSession()): number | undefined {
+    if (!session) return undefined;
+    for (const [ws, retained] of this.retainedForwarding) {
+      if (this.sessions.get(ws) === session) return retained.expiresAt;
+    }
+    return undefined;
+  }
+
+  private stopForwarding(): void {
+    const session = this.forwarding.currentSession();
+    this.forwarding.stop();
+    if (!session) return;
+    for (const [ws, current] of this.sessions) {
+      if (current === session) this.cleanup(ws, true);
+    }
   }
 
   private cleanupSFTPWebSocket(ws: WebSocket): void {

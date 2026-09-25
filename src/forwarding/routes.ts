@@ -6,7 +6,15 @@ import { TRUSTED_PREFIX } from './mount.ts';
 
 /** 只有主站的认证 API 能创建或撤销转发；预览站没有 SSH 控制接口。 */
 export async function forwardingRoute(request: Request, env: Env, accountId: string): Promise<Response> {
+  const url = new URL(request.url);
   if (request.method === 'GET') {
+    const session = url.searchParams.get('session');
+    if (session) {
+      if (!/^[a-f0-9]{64}$/.test(session)) return jsonError('Invalid session identifier', 400);
+      return env.SSH_SESSIONS.get(env.SSH_SESSIONS.idFromString(session)).fetch(new Request('https://session.internal/forward', {
+        headers: { 'x-account-id': accountId },
+      }));
+    }
     let previewAvailable = false;
     try {
       previewOrigin(env.PREVIEW_ORIGIN, new URL(request.url).origin);
@@ -16,7 +24,6 @@ export async function forwardingRoute(request: Request, env: Env, accountId: str
     return Response.json({ previewAvailable }, { headers: { 'Cache-Control': 'no-store' } });
   }
   if (request.method !== 'POST' && request.method !== 'DELETE') return jsonError('Method not allowed', 405);
-  const url = new URL(request.url);
   const session = url.searchParams.get('session');
   if (!session || !/^[a-f0-9]{64}$/.test(session)) return jsonError('Invalid session identifier', 400);
   let origin = url.origin;

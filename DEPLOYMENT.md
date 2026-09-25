@@ -76,7 +76,7 @@ API Token 只存 GitHub Secret，不放普通变量、代码或命令行输入�
 
 主站与预览必须跨 site：自定义域名加默认 `workers.dev` 可行；自定义域名加同站自定义域名会拒绝；同账户双 `workers.dev` 也会拒绝，主站只有 `workers.dev` 时需独立自定义域名。专用 preview 同一 origin 内不同目标网站不相互隔离，切换前关闭旧预览窗口。
 
-操作步骤：在端口转发页面选择主机和端口转发类型（如 `127.0.0.1` HTTP）→ 选择 `trusted` 或 `isolated`（trusted 需勾选界面信任确认，isolated 不需要）→ 确认指纹并连接。连接期间禁用模式切换，需先点击停止再切换。停止主站连接、离开主站端口转发管理页、刷新页面或 SSH 断线后预览失效；仅关闭目标预览 tab 不保证停止。isolated 票据 60 秒内只能兑换一次，兑换后的授权最长 1 小时；trusted 链接依赖主站登录及账户绑定，不使用一次性 fragment。
+操作步骤：在端口转发页面选择主机和端口转发类型（如 `127.0.0.1` HTTP）→ 选择 `trusted` 或 `isolated`（trusted 需勾选界面信任确认，isolated 不需要）→ 确认指纹并连接。连接期间禁用模式切换，需先点击停止再切换。离开管理页或刷新后，Worker 保持 SSH 转发 8 分钟；期限内重新进入可恢复显示、重新打开预览或立即停止。8 分钟到期、用户点击停止、SSH 断线或 Durable Object 重启后预览失效；仅关闭目标预览 tab 不保证停止。isolated 票据 60 秒内只能兑换一次，兑换后的授权最长 1 小时；trusted 链接依赖主站登录及账户绑定，不使用一次性 fragment。
 
 标准实现改写 HTML 属性、`srcset`、CSS URL、`Location`、Cookie 名称与 Path，并注入常见 `fetch`/XHR/EventSource/history/cookie 兼容脚本；不承诺任意网站透明代理。严格 CSP、动态 ES 模块、写死的 location、复杂 inline CSS/JS 框架仍可能需要 baseURL 配置，优先使用 isolated。仅支持 HTTP/SSE、相对资源、表单、目标 Cookie、重定向和 HTTP Basic 鉴权；HTTP 上游限 `127.0.0.1`，上传 16 MiB，CSS 重写 2 MiB，最多 24 个并发通道，通道闲置 60 秒。HTTPS 上游、WebSocket、Service Worker、写死 `localhost`、OAuth 固定 callback 不支持；SFTP 上传仍为 64 MiB。
 

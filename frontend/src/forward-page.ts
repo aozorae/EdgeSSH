@@ -1,6 +1,16 @@
 import { api, hostCredentials, type CloudHost } from './cloud-api';
 import './forward-page.css';
 
+const FORWARD_SESSION_STORAGE_KEY = 'edgessh.forwarding-session';
+const FORWARD_RETENTION_MS = 8 * 60 * 1000;
+
+interface ForwardingStatus {
+  active: boolean;
+  port?: number;
+  mode?: 'trusted' | 'isolated';
+  expiresAt?: number;
+}
+
 /** 转发持有独立 SSH 连接；标准模式与主站同源，不能当作恶意脚本的安全边界。 */
 export class ForwardPage {
   readonly root = document.createElement('main');
@@ -8,10 +18,13 @@ export class ForwardPage {
   private socket?: WebSocket;
   private sessionId?: string;
   private generation = 0;
+  private restoreGeneration = 0;
   private busy = false;
   private ready = false;
   private popup: Window | null = null;
   private deadline?: ReturnType<typeof setTimeout>;
+  private retentionDeadline?: number;
+  private retentionTimer?: ReturnType<typeof setTimeout>;
   private readonly select: HTMLSelectElement;
   private readonly port: HTMLInputElement;
   private readonly startButton: HTMLButtonElement;
@@ -56,7 +69,7 @@ export class ForwardPage {
       <section class="forward-explanation" aria-label="隔离与使用说明">
         <h2>可信网站简单用，不可信网站单独隔离</h2>
         <p>标准转发使用当前 Worker 的独立路径，不增加部署资源。隔离预览使用可选的独立 Worker 和跨站域名，不共享主站登录 Cookie。</p>
-        <ol><li>选择云端主机，输入网站的 HTTP 端口。</li><li>核对 SSH 主机指纹，连接后自动打开预览。</li><li>用完点击停止；离开此页面、刷新或断线后，转发立即失效。</li></ol>
+        <ol><li>选择云端主机，输入网站的 HTTP 端口。</li><li>核对 SSH 主机指纹，连接后自动打开预览。</li><li>离开此页面后转发保持 8 分钟；重新进入可查看或立即停止。</li></ol>
         <p class="forward-hint">支持常见资源、表单、网站 Cookie、HTTP 登录和重定向。授权最长 1 小时，上传最多 16 MiB。不支持 HTTPS 上游、WebSocket、Service Worker。标准模式兼容常见 fetch / XHR，但不是任意网站的透明代理；复杂 SPA、动态模块或硬编码跳转可能需要网站配置 base URL。同一隔离预览域名一次只使用一个网站，切换前关闭旧窗口。</p>
       </section>
       <dialog class="host-dialog" aria-labelledby="forward-key-heading">
@@ -91,7 +104,7 @@ export class ForwardPage {
       this.reservePopup();
       void this.launch(this.generation);
     });
-    window.addEventListener('pagehide', () => this.stop());
+    window.addEventListener('pagehide', () => this.suspend());
     window.addEventListener('auth-required', () => this.stop());
   }
 
@@ -112,10 +125,12 @@ export class ForwardPage {
     void api<{ previewAvailable: boolean }>('/api/forwarding').then((config) => {
       this.previewAvailable = config.previewAvailable === true; this.render();
     }).catch(() => { this.previewAvailable = false; this.render(); });
+    void this.restore(++this.restoreGeneration);
   }
   hide(): void {
     if (this.root.hidden) return;
-    this.stop();
+    this.restoreGeneration++;
+    this.suspend();
     this.root.hidden = true;
   }
 
@@ -218,28 +233,94 @@ export class ForwardPage {
         });
       if (generation !== this.generation) return;
       this.ready = true;
+      this.rememberSession();
+      if (!this.socket) this.scheduleRetention(expiresAt);
       const link = this.get<HTMLAnchorElement>('[data-preview-link]');
       link.href = url;
       if (this.popup && !this.popup.closed) this.popup.location.replace(url);
       else link.hidden = false;
       this.popup = null;
-      this.message(`已转发 127.0.0.1:${this.port.value} · 授权至 ${new Date(expiresAt).toLocaleTimeString()} · 请保持本页打开`);
+      this.message(`已转发 127.0.0.1:${this.port.value} · 授权至 ${new Date(expiresAt).toLocaleTimeString()} · 离开页面后保持 8 分钟`);
     } catch (error) {
       if (generation === this.generation) this.stop(error instanceof Error ? error.message : '创建转发失败。');
     } finally { if (generation === this.generation) { this.busy = false; this.render(); } }
   }
 
   stop(message = '已停止转发，预览授权已失效。'): void {
+    const sessionId = this.sessionId;
+    this.generation++;
+    this.restoreGeneration++;
+    clearTimeout(this.deadline);
+    clearTimeout(this.retentionTimer);
+    this.retentionTimer = undefined; this.retentionDeadline = undefined;
+    this.pendingKey = undefined; this.keyDialog.close();
+    this.popup?.close(); this.popup = null;
+    this.socket?.close(); this.socket = undefined;
+    this.sessionId = undefined; this.busy = false; this.ready = false;
+    localStorage.removeItem(FORWARD_SESSION_STORAGE_KEY);
+    if (sessionId) void api(`/api/forwarding?session=${sessionId}`, 'DELETE').catch(() => undefined);
+    this.trust.checked = false;
+    this.get('[data-preview-link]').hidden = true;
+    this.get<HTMLAnchorElement>('[data-preview-link]').removeAttribute('href');
+    this.message(message); this.render();
+  }
+
+  private suspend(): void {
+    if (!this.ready || !this.sessionId) {
+      if (this.busy) this.stop();
+      return;
+    }
     this.generation++;
     clearTimeout(this.deadline);
     this.pendingKey = undefined; this.keyDialog.close();
     this.popup?.close(); this.popup = null;
     this.socket?.close(); this.socket = undefined;
-    // 主 WebSocket 关闭就是撤销操作；无需依赖卸载页面时不可靠的异步 fetch。
-    this.sessionId = undefined; this.busy = false; this.ready = false;
-    this.trust.checked = false;
-    this.get('[data-preview-link]').hidden = true;
-    this.get<HTMLAnchorElement>('[data-preview-link]').removeAttribute('href');
-    this.message(message); this.render();
+    this.busy = false;
+    this.rememberSession();
+    this.scheduleRetention(Date.now() + FORWARD_RETENTION_MS);
+    this.message(`后台保持 127.0.0.1:${this.port.value} 至 ${new Date(this.retentionDeadline!).toLocaleTimeString()}，重新进入可继续查看或停止。`);
+    this.render();
+  }
+
+  private rememberSession(): void {
+    // 这里只保存无权访问 SSH 的 DO 标识；账户校验和 8 分钟期限仍由 Worker 决定。
+    if (this.sessionId) localStorage.setItem(FORWARD_SESSION_STORAGE_KEY, this.sessionId);
+  }
+
+  private scheduleRetention(expiresAt: number): void {
+    clearTimeout(this.retentionTimer);
+    this.retentionDeadline = expiresAt;
+    this.retentionTimer = setTimeout(() => this.stop('后台保持 8 分钟已结束，转发已自动停止。'),
+      Math.max(0, expiresAt - Date.now()));
+  }
+
+  private async restore(generation: number): Promise<void> {
+    const sessionId = this.sessionId ?? localStorage.getItem(FORWARD_SESSION_STORAGE_KEY) ?? undefined;
+    if (!sessionId || this.socket) return;
+    this.busy = true; this.render();
+    try {
+      const status = await api<ForwardingStatus>(`/api/forwarding?session=${sessionId}`);
+      if (generation !== this.restoreGeneration) return;
+      if (!status.active || !status.port || !status.mode || !status.expiresAt) {
+        localStorage.removeItem(FORWARD_SESSION_STORAGE_KEY);
+        if (this.sessionId === sessionId) this.stop('之前保持的转发已结束。');
+        else this.message('之前保持的转发已结束。');
+        return;
+      }
+      this.sessionId = sessionId;
+      this.port.value = String(status.port);
+      this.mode.value = status.mode;
+      this.trust.checked = status.mode === 'trusted';
+      this.ready = true;
+      this.scheduleRetention(status.expiresAt);
+      this.message(`正在保持 127.0.0.1:${status.port} 至 ${new Date(status.expiresAt).toLocaleTimeString()}，可重新打开预览或立即停止。`);
+    } catch {
+      if (generation !== this.restoreGeneration) return;
+      localStorage.removeItem(FORWARD_SESSION_STORAGE_KEY);
+      this.sessionId = undefined; this.ready = false;
+      this.message('之前保持的转发已结束。');
+    } finally {
+      if (generation === this.restoreGeneration) { this.busy = false; this.render(); }
+    }
   }
 }

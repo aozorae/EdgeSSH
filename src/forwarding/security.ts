@@ -1,6 +1,7 @@
 export const PREVIEW_COOKIE = '__Host-edgessh-preview';
 export const PREVIEW_PREFIX = '/__edgessh/';
 export const FORWARD_TTL_MS = 60 * 60 * 1000;
+export const FORWARD_RETENTION_MS = 8 * 60 * 1000;
 export const LAUNCH_TTL_MS = 60_000;
 
 // workers.dev 是公共后缀，但同账户的两个 Worker 仍共享 account.workers.dev。
