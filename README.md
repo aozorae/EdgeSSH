@@ -600,6 +600,12 @@ EdgeSSH 基于:
 
 ---
 
+# 特别致谢
+
+特别感谢 [Linux.do 社区](https://linux.do/) 对 EdgeSSH 推广的支持，让 EdgeSSH 有机会在社区内发帖分享与交流。
+
+---
+
 # Contributing
 
 欢迎提交:
