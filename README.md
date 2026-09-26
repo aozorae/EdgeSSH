@@ -25,10 +25,9 @@ Cloudflare-native · Self-hosted · Single-admin · Open source
 
 <br />
 
-<!-- HERO SCREENSHOT -->
-<!-- 建议：完整 Dashboard，能同时看到主机卡片 + 3D 地球，16:9 或更宽 -->
+![EdgeSSH 全球主机总览](docs/images/showcase/01-dashboard.png)
 
-![EdgeSSH Dashboard](docs/images/edgessh-dashboard-demo.png)
+<sub>全部演示数据使用文档保留地址与虚构信息，不对应任何真实服务器。</sub>
 
 <br />
 
@@ -110,9 +109,6 @@ EdgeSSH 把 WebSSH 的连接层、主机管理与工作台界面，一起部署�
 
 ## 一个地方，管好你所有的服务器
 
-<!-- SCREENSHOT -->
-<!-- 建议：Host Dashboard / 主机卡片 / 搜索 / 分组 -->
-
 EdgeSSH 把散落各处的服务器连接信息，收进统一的主机库。
 
 在这里你可以：
@@ -132,8 +128,7 @@ EdgeSSH 把散落各处的服务器连接信息，收进统一的主机库。
 
 **打开浏览器，就是进了服务器。**
 
-<!-- SCREENSHOT -->
-<!-- 建议：完整 Terminal 工作区 -->
+![EdgeSSH 实时 SSH 终端](docs/images/showcase/02-ssh-terminal.png)
 
 基于 xterm.js 的交互式终端，支持：
 
@@ -147,6 +142,8 @@ EdgeSSH 把散落各处的服务器连接信息，收进统一的主机库。
 - keyboard-interactive
 - OpenSSH 私钥认证
 
+![EdgeSSH 终端命令工作流](docs/images/showcase/03-terminal-command-workflow.png)
+
 第一次连接某台服务器时，EdgeSSH 会先展示它的 **SHA-256 Host Key Fingerprint**。
 
 只有你确认无误后，才会继续发送 SSH 凭据。
@@ -157,8 +154,7 @@ EdgeSSH 把散落各处的服务器连接信息，收进统一的主机库。
 
 **不必为了改一个文件,再多开一个工具。**
 
-<!-- SCREENSHOT -->
-<!-- 建议：独立 File Manager -->
+![EdgeSSH SFTP 文件管理](docs/images/showcase/05-sftp-file-manager.png)
 
 EdgeSSH 内置了一个基于 SFTP 的文件管理器：
 
@@ -177,8 +173,7 @@ Terminal 与 File Manager 共用同一个 SSH 会话，切换之间不必重新�
 
 ## 📊 Server Monitor
 
-<!-- SCREENSHOT -->
-<!-- 建议：Terminal + 右侧 System / Process Panel -->
+![EdgeSSH 实时进程监控](docs/images/showcase/04-process-monitor.png)
 
 在 SSH 会话里就能直接看到：
 
@@ -198,8 +193,7 @@ Terminal 与 File Manager 共用同一个 SSH 会话，切换之间不必重新�
 
 在 EdgeSSH 里,同样可以打开它。
 
-<!-- SCREENSHOT -->
-<!-- 建议：Port Forward 页面 + Preview 窗口 -->
+![EdgeSSH 隔离端口转发预览](docs/images/showcase/07-isolated-web-preview.png)
 
 EdgeSSH 能借助已有的 SSH 会话,访问服务器本地的 HTTP 服务,并在浏览器里给出一个临时预览。
 
@@ -217,8 +211,7 @@ EdgeSSH 能借助已有的 SSH 会话,访问服务器本地的 HTTP 服务,并�
 
 ## 📝 Code Snippets
 
-<!-- SCREENSHOT -->
-<!-- 建议：代码片段页面或者 Terminal 浮动面板 -->
+![EdgeSSH 加密同步命令库](docs/images/showcase/06-command-library.png)
 
 把常用命令存下来:
 
@@ -238,9 +231,6 @@ journalctl -xe
 ---
 
 ## 🌍 服务器,也可以从地球上看
-
-<!-- SCREENSHOT -->
-<!-- 建议：这里放你最漂亮的一张 3D 地球图 -->
 
 EdgeSSH 会根据服务器的公网 IP,估算出大致地理位置,并画在 Dashboard 的地球上。
 
@@ -385,6 +375,8 @@ EdgeSSH 是一个 **Single-admin Workspace**。
 第一次连接服务器,必须确认 SSH Host Key Fingerprint。
 
 指纹一旦发生变化,会再次要求你确认。
+
+![EdgeSSH SSH 主机指纹确认](docs/images/showcase/08-host-key-verification.png)
 
 ### Single-admin
 
@@ -567,6 +559,7 @@ npm run dev:web
 | `npm run typecheck` | TypeScript check |
 | `npm test` | Run tests |
 | `npm run test:browser` | Browser regression tests |
+| `npm run showcase` | Regenerate privacy-safe README screenshots with local Chrome |
 | `npm run check` | Full validation |
 | `npm run deploy` | Deploy to Cloudflare |
 
