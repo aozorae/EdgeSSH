@@ -8,6 +8,8 @@ coverage/
 !.env.example
 .workbuddy/
 AGENTS.md
+# 导览.md 与 AGENTS.md 一样属于本地工作文档：含面向本机协作的导航信息，不上传仓库。
+导览.md
 deliverables/
 frontend/dist-*
 scripts-tmp/
