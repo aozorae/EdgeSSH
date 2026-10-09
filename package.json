@@ -11,6 +11,7 @@
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
+    "test:docs": "npm run docs:build && node --test tests/docs-seo.test.mjs",
     "typecheck": "tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.frontend.json --noEmit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "check": "npm run typecheck && npm run test && npm run docs:build && wrangler deploy --dry-run --outdir .wrangler/build",

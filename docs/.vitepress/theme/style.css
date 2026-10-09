@@ -154,7 +154,7 @@ button:focus-visible,
 }
 
 .home-workbench,
-.home-path,
+.home-features,
 .home-boundary {
   margin-inline: auto;
   max-width: 1120px;
@@ -194,47 +194,51 @@ button:focus-visible,
   padding-top: var(--space-lg);
 }
 
-.home-workbench__note strong {
+.VPHome .home-workbench__note h2 {
+  /* 首页标题不沿用正文的章节分隔线和留白，避免重复边框挤开产品说明。 */
+  border: 0;
   color: var(--color-ink);
   display: block;
   font-family: var(--font-display);
   font-size: var(--text-lg);
   line-height: 1.25;
+  margin: 0;
+  padding: 0;
 }
 
 .home-workbench__note p {
   line-height: 1.75;
 }
 
-.home-path {
+.home-features {
   padding-top: var(--space-3xl);
 }
 
-.home-path h2,
-.home-boundary h2 {
+.VPHome .home-features h2,
+.VPHome .home-boundary h2 {
   border: 0;
   font-size: var(--text-xl);
   margin: 0 0 var(--space-xl);
   padding: 0;
 }
 
-.deploy-track {
+.feature-grid {
   border-top: var(--rule-thin) solid var(--color-rule-strong);
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-.deploy-track > div {
+.feature-grid > div {
   border-bottom: var(--rule-thin) solid var(--color-rule);
   padding: var(--space-lg) var(--space-md) var(--space-xl) 0;
 }
 
-.deploy-track > div + div {
+.feature-grid > div + div {
   border-inline-start: var(--rule-thin) solid var(--color-rule);
   padding-inline-start: var(--space-md);
 }
 
-.deploy-track span {
+.feature-grid span {
   color: var(--color-accent-strong);
   display: block;
   font-family: var(--font-mono);
@@ -242,14 +246,18 @@ button:focus-visible,
   margin-bottom: var(--space-lg);
 }
 
-.deploy-track strong {
+.VPHome .feature-grid h3 {
   color: var(--color-ink);
   display: block;
   font-size: var(--text-md);
-  margin-bottom: var(--space-xs);
+  margin: 0 0 var(--space-xs);
 }
 
-.deploy-track p {
+.feature-grid .home-link {
+  margin-top: var(--space-md);
+}
+
+.feature-grid p {
   color: var(--color-ink-soft);
   line-height: 1.65;
   margin: 0;
@@ -426,11 +434,11 @@ button:focus-visible,
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .deploy-track {
+  .feature-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .deploy-track > div:nth-child(3) {
+  .feature-grid > div:nth-child(3) {
     border-inline-start: 0;
     padding-inline-start: 0;
   }
@@ -446,8 +454,8 @@ button:focus-visible,
   }
 
   .VPHomeHero .text,
-  .home-path h2,
-  .home-boundary h2 {
+  .VPHome .home-features h2,
+  .VPHome .home-boundary h2 {
     font-size: 1.75rem;
   }
 
@@ -461,18 +469,18 @@ button:focus-visible,
   }
 
   .home-workbench,
-  .home-path,
+  .home-features,
   .home-boundary {
     padding-inline: var(--space-md);
   }
 
-  .deploy-track {
+  .feature-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .deploy-track > div,
-  .deploy-track > div + div,
-  .deploy-track > div:nth-child(3) {
+  .feature-grid > div,
+  .feature-grid > div + div,
+  .feature-grid > div:nth-child(3) {
     border-inline-start: 0;
     padding-inline-start: 0;
   }

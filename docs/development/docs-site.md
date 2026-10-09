@@ -42,6 +42,12 @@ Workers & Pages → edgessh-docs → Custom domains
 
 Pages 默认地址为 `edgessh-docs.pages.dev`。当前无需自定义域名即可阅读；不要把文档站域名误填成 SSH 应用的 `CUSTOM_DOMAIN`。
 
+### 首页与搜索信息
+
+首页 `docs/index.md` 介绍产品用途与功能，部署步骤保留在部署指南中。页面标题与摘要由 frontmatter 设置；`docs/.vitepress/config.ts` 统一生成规范链接、Open Graph / Twitter 分享信息、首页软件结构化数据及站点地图，`docs/public/robots.txt` 声明站点地图入口。
+
+正式域名变更时，同步更新配置中的 `siteUrl`、`robots.txt` 和 `tests/docs-seo.test.mjs`，避免规范链接仍指向旧站。不要为 Pages 临时预览地址生成另一套规范链接。`npm run test:docs` 会构建并检查实际静态 HTML、站点地图、分享信息及首页站内链接。
+
 ## 本地预览
 
 ```bash
