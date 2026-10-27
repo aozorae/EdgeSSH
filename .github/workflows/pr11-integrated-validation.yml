@@ -1,0 +1,86 @@
+name: PR 11 integrated validation
+on:
+  push:
+    branches: [fix/pr11-integration]
+    paths: [.github/workflows/pr11-integrated-validation.yml]
+permissions:
+  contents: write
+defaults:
+  run:
+    shell: bash
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare final repairs and integrate current main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git apply --check scripts/pr11-read-cleanup.patch
+          git apply scripts/pr11-read-cleanup.patch
+          git rm scripts/pr11-read-cleanup.patch .github/workflows/pr11-final-validation.yml .github/workflows/pr11-integrated-validation.yml
+          git add -A
+          git commit -m 'fix(files): release failed text streams and remove temporary validation harness'
+          test "$(git rev-parse origin/main)" = '1f02d85143751bbfd44081035b68034985d4e29a'
+          if ! git merge --no-commit --no-ff 1f02d85143751bbfd44081035b68034985d4e29a; then
+            python3 - <<'PY'
+          import pathlib, subprocess
+          conflicts = subprocess.check_output(['git','diff','--name-only','--diff-filter=U'], text=True).splitlines()
+          path = 'src/backend/sftp-handler.ts'
+          assert conflicts == [path], conflicts
+          ours = subprocess.check_output(['git','show',':2:'+path], text=True)
+          theirs = subprocess.check_output(['git','show',':3:'+path], text=True)
+          old = 'await this.client.rename(upload.uploadPath, upload.destinationPath);'
+          new = 'await this.client.rename(upload.uploadPath, upload.destinationPath, true);'
+          assert ours.count(old) == 1 and new in theirs
+          pathlib.Path(path).write_text(ours.replace(old, new))
+          subprocess.run(['git','add',path], check=True)
+          PY
+          fi
+          grep -F 'await this.client.rename(upload.uploadPath, upload.destinationPath, true);' src/backend/sftp-handler.ts
+          git diff --cached --check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install root and CLI dependencies
+        run: npm ci && npm ci --prefix cli
+      - name: Typecheck, unit tests and Worker dry run
+        run: npm run check 2>&1 | tee /tmp/pr11-check.log
+      - name: CLI tests and independent SSH protocol integration
+        run: (npm run test:cli && npm run test:cli:ssh) 2>&1 | tee /tmp/pr11-cli.log
+      - name: Build frontend and manifest
+        run: npm run build:web -- --manifest 2>&1 | tee /tmp/pr11-build.log
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: All desktop and mobile browser regressions
+        run: npx playwright test --workers=4 2>&1 | tee /tmp/pr11-browser.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr11-integrated-validation
+          path: |
+            /tmp/pr11-*.log
+            dist/.vite/manifest.json
+            test-results/
+          retention-days: 3
+      - name: Commit and export tested integration tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(files): integrate reviewed editor repairs with current CLI and atomic rename'
+          git -c credential.helper='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' push origin HEAD:refs/heads/fix/pr11-integration
+          git log -1 --format='%H %T %s'
+          git archive --format=tar.gz HEAD > /tmp/pr11-integrated-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr11-integrated-source
+          path: /tmp/pr11-integrated-source.tar.gz
+          retention-days: 3
