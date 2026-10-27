@@ -23,9 +23,25 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git apply --check scripts/pr11-read-cleanup.patch
           git apply scripts/pr11-read-cleanup.patch
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path('frontend/src/file-manager.ts')
+          source = p.read_text()
+          needle = "    const requestId = this.createRequest('readText', path);\n"
+          assert source.count(needle) == 1
+          p.write_text(source.replace(needle, "    this.elements.error.hidden = true;\n" + needle))
+          p = pathlib.Path('tests/browser/editor-regressions.spec.ts')
+          source = p.read_text()
+          needle = "  options.readError = false;\n  await row.dblclick();"
+          assert source.count(needle) == 1
+          source = source.replace(needle, "  options.readError = false;\n  await page.locator('#file-edit').click();")
+          needle = "  await expect(page.locator('.file-editor .cm-content')).toContainText('Edge SSH');"
+          assert source.count(needle) == 1
+          p.write_text(source.replace(needle, needle + "\n  await expect(page.locator('#file-manager-error')).toBeHidden();"))
+          PY
           git rm scripts/pr11-read-cleanup.patch .github/workflows/pr11-final-validation.yml .github/workflows/pr11-integrated-validation.yml
           git add -A
-          git commit -m 'fix(files): release failed text streams and remove temporary validation harness'
+          git commit -m 'fix(files): release failed text streams and clear stale retry errors'
           test "$(git rev-parse origin/main)" = '1f02d85143751bbfd44081035b68034985d4e29a'
           if ! git merge --no-commit --no-ff 1f02d85143751bbfd44081035b68034985d4e29a; then
             python3 - <<'PY'
