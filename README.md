@@ -53,6 +53,21 @@
 
 ---
 
+## CLI / Agent 调用
+
+本地 Agent 可以通过 CLI 使用现有主机、SSH 和文件功能，使用 Cloudflare Access 浏览器登录并复用令牌。需要先部署本次代码并安装 Node.js 22.12+ 与 cloudflared。
+
+```sh
+npm --prefix cli ci
+npm install --global ./cli
+edgessh login --url https://ssh.example.com
+edgessh hosts
+edgessh exec "主机名" --json -- 'uname -a'
+edgessh get "主机名" /var/log/app.log ./app.log
+```
+
+支持交互终端、目录查看、上传下载、创建目录、重命名和删除。命令执行与文件操作按需连接，完成即断开，设有超时和输出上限。安装、指纹确认、Agent 用法和资源消耗说明见 [CLI 文档](cli/README.md)。
+
 ## 为什么是 EdgeSSH？
 
 SSH 客户端不少，WebSSH 也算不上新鲜。

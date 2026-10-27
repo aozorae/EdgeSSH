@@ -1,5 +1,6 @@
 import {
   SSH_MSG_CHANNEL_CLOSE,
+  SSH_MSG_CHANNEL_REQUEST,
   SSH_MSG_CHANNEL_DATA,
   SSH_MSG_CHANNEL_EOF,
   SSH_MSG_CHANNEL_EXTENDED_DATA,
@@ -177,7 +178,7 @@ export class SSHSession {
   private passwordAuthMethod: 'password' | 'keyboard-interactive' = 'password';
   private keyboardInteractiveRounds = 0;
   private keyboardInteractivePasswordSent = false;
-  private pendingChannelRequest: 'pty' | 'shell' | null = null;
+  private pendingChannelRequest: 'pty' | 'shell' | 'exec' | null = null;
   private nextChannelID = 1;
   private sftpChannel: SSHChannel | null = null;
   private sftpHandler: SFTPHandler | null = null;
@@ -204,6 +205,10 @@ export class SSHSession {
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private keepalivePending = 0;
   private shellTimer: ReturnType<typeof setTimeout> | null = null;
+  private lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
+  private execExitCode: number | null = null;
+  private execSignal: string | null = null;
+  private execOutputBytes = 0;
   private readTask: Promise<void> | null = null;
   private pendingHostConfirmation: { fingerprint: string; resolve: (accepted: boolean) => void } | null = null;
 
@@ -214,6 +219,7 @@ export class SSHSession {
   }
 
   async start(): Promise<void> {
+    if (this.config.timeoutMs) this.lifetimeTimer = setTimeout(() => this.fail(new Error('CLI session timed out'), 'session_timeout'), this.config.timeoutMs);
     this.status('version_exchange', 'Exchanging SSH protocol versions');
     await this.write(this.transport.getLocalIdentification());
     this.readTask = this.readLoop();
@@ -245,7 +251,7 @@ export class SSHSession {
   async handleClientMessage(message: string | ArrayBuffer): Promise<void> {
     if (this.phase === 'closed') return;
     if (message instanceof ArrayBuffer) {
-      if (this.config.mode === 'forward') throw new Error('Terminal input is disabled for forwarding sessions');
+      if (this.config.mode) throw new Error('Terminal input is disabled for this session');
       if (message.byteLength > 64 * 1024) throw new Error('Binary terminal input exceeds 64 KiB');
       this.queueInput(new Uint8Array(message));
       return;
@@ -266,7 +272,7 @@ export class SSHSession {
       this.sendJson({ type: 'pong' });
       return;
     }
-    if (this.config.mode === 'forward') throw new Error('Terminal input is disabled for forwarding sessions');
+    if (this.config.mode) throw new Error('Terminal input is disabled for this session');
     const resize = value.type === 'resize'
       ? [value.cols, value.rows]
       : Array.isArray(value.resize) ? value.resize : null;
@@ -289,6 +295,8 @@ export class SSHSession {
     this.forwards.clear();
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
     if (this.shellTimer) clearTimeout(this.shellTimer);
+    if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
+    this.lifetimeTimer = null;
     this.keepaliveTimer = null;
     this.shellTimer = null;
     this.inputQueue = [];
@@ -672,10 +680,11 @@ export class SSHSession {
       if (!this.authRequestSent) throw new Error('SSH authentication completed before credentials were sent');
       this.config.password = undefined;
       this.config.privateKey = undefined;
-      if (this.config.mode === 'forward') {
+      if (this.config.mode === 'forward' || this.config.mode === 'sftp') {
         this.phase = 'ready';
         this.startKeepalive();
         this.sendJson({ type: 'ready' });
+        if (this.config.mode === 'sftp' && this.sftpAttachUrl) this.sendJson({ type: 'sftp_attach', url: this.sftpAttachUrl });
         return;
       }
       this.status('auth_success', 'SSH authentication succeeded; opening terminal');
@@ -712,8 +721,13 @@ export class SSHSession {
       channel.handleOpenConfirmation(payload);
       if (isShell) {
         if (this.phase !== 'pty') throw new Error('Unexpected shell channel open confirmation');
-        this.pendingChannelRequest = 'pty';
-        await this.sendEncrypted(channel.buildPTYRequest(this.config.cols, this.config.rows, this.config.term));
+        if (this.config.mode === 'exec') {
+          this.pendingChannelRequest = 'exec';
+          await this.sendEncrypted(channel.buildExecRequest(this.config.command!));
+        } else {
+          this.pendingChannelRequest = 'pty';
+          await this.sendEncrypted(channel.buildPTYRequest(this.config.cols, this.config.rows, this.config.term));
+        }
       } else if (channel === this.systemProbe?.channel) {
         const probe = this.systemProbe;
         if (probe.timeout) { clearTimeout(probe.timeout); probe.timeout = null; }
@@ -799,10 +813,15 @@ export class SSHSession {
       this.clearPendingSFTPChannelOpen(channel);
       if (isShell) {
         const pending = this.pendingChannelRequest;
-        if (!pending || pending !== this.phase) throw new Error('Unexpected SSH channel request result');
+        if (!pending || (pending === 'exec' ? this.phase !== 'pty' : pending !== this.phase)) throw new Error('Unexpected SSH channel request result');
         this.pendingChannelRequest = null;
-        if (type === SSH_MSG_CHANNEL_FAILURE) throw new Error(`SSH server rejected the ${pending === 'pty' ? 'PTY' : 'shell'} request`);
-        if (pending === 'pty') {
+        if (type === SSH_MSG_CHANNEL_FAILURE) throw new Error(`SSH server rejected the ${pending === 'pty' ? 'PTY' : pending} request`);
+        if (pending === 'exec') {
+          this.phase = 'ready';
+          this.sendJson({ type: 'ready' });
+          // Noninteractive commands receive EOF immediately, like ssh -n.
+          await this.sendEncrypted(channel.buildEof());
+        } else if (pending === 'pty') {
           this.phase = 'shell';
           this.pendingChannelRequest = 'shell';
           await this.sendEncrypted(channel.buildShellRequest());
@@ -842,7 +861,8 @@ export class SSHSession {
       const output = channel.handleChannelData(payload);
       if (isShell) {
         if (this.phase === 'shell') this.markReady();
-        this.ws.send(output);
+        if (this.config.mode === 'exec') this.sendExecOutput(output, false);
+        else this.ws.send(output);
       } else if (channel === this.systemProbe?.channel) {
         this.appendSystemProbeOutput(this.systemProbe, output);
       } else if (channel === this.sftpChannel && this.sftpHandler) {
@@ -864,7 +884,8 @@ export class SSHSession {
       const output = channel.handleExtendedData(payload);
       if (isShell) {
         if (this.phase === 'shell') this.markReady();
-        this.ws.send(output);
+        if (this.config.mode === 'exec') this.sendExecOutput(output, true);
+        else this.ws.send(output);
       } else if (channel === this.systemProbe?.channel) {
         // 探测命令的 stderr 只代表该功能不可用，不应影响已经建立的终端会话。
       } else if (channel === this.sftpChannel) {
@@ -876,6 +897,24 @@ export class SSHSession {
         this.appendKillOutput(this.pendingProcessKillChannels.get(channelID)!, output, true);
       }
       await this.adjustLocalWindow(channel);
+      return;
+    }
+    if (type === SSH_MSG_CHANNEL_REQUEST && isShell && this.config.mode === 'exec') {
+      const request = this.readString(payload, 5);
+      const offset = request.next;
+      if (offset >= payload.length || payload[offset] > 1) throw new Error('Malformed channel request');
+      if (request.value === 'exit-status') {
+        if (payload.length !== offset + 5) throw new Error('Malformed exit status');
+        this.execExitCode = readUint32(payload, offset + 1);
+      } else if (request.value === 'exit-signal') {
+        this.execSignal = this.readString(payload, offset + 1).value;
+      }
+      if (payload[offset]) {
+        const reply = new Uint8Array(5);
+        reply[0] = SSH_MSG_CHANNEL_FAILURE;
+        new DataView(reply.buffer).setUint32(1, channel.getRemoteChannelID());
+        await this.sendEncrypted(reply);
+      }
       return;
     }
     if (type === SSH_MSG_CHANNEL_WINDOW_ADJUST) {
@@ -899,6 +938,7 @@ export class SSHSession {
       channel.handleClose(payload);
       if (!channel.hasSentClose()) await this.sendEncrypted(channel.buildClose());
       if (isShell) {
+        if (this.config.mode === 'exec') this.sendJson({ type: 'exec_result', exitCode: this.execExitCode, signal: this.execSignal });
         this.status('session_ended', 'SSH session ended');
         this.close(true);
       } else {
@@ -923,6 +963,13 @@ export class SSHSession {
       }
       return;
     }
+  }
+
+  private sendExecOutput(output: Uint8Array, stderr: boolean): void {
+    this.execOutputBytes += output.length;
+    if (this.execOutputBytes > 16 * 1024 * 1024) throw new Error('Exec output exceeds 16 MiB');
+    // Base64 preserves arbitrary bytes and keeps stdout/stderr separate.
+    this.sendJson({ type: 'exec_output', stream: stderr ? 'stderr' : 'stdout', data: this.base64(output) });
   }
 
   private markReady(): void {

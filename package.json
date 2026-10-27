@@ -14,7 +14,9 @@
     "showcase": "node scripts/generate-showcase.mjs",
     "check": "npm run typecheck && npm run test && wrangler deploy --dry-run --outdir .wrangler/build",
     "deploy:validate": "node --experimental-strip-types scripts/deploy.ts --validate-only",
-    "deploy": "node --experimental-strip-types scripts/deploy.ts"
+    "deploy": "node --experimental-strip-types scripts/deploy.ts",
+    "test:cli": "npm --prefix cli test",
+    "test:cli:ssh": "node --test tests/cli-ssh.integration.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.1",

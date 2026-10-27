@@ -41,7 +41,9 @@ export interface SSHConnectionConfig {
   rows: number;
   term: string;
   expectedFingerprint?: string;
-  mode?: 'forward';
+  mode?: 'forward' | 'exec' | 'sftp';
+  command?: string;
+  timeoutMs?: number;
 }
 
 export interface TerminalSize {
@@ -130,9 +132,11 @@ export function parseConnectMessage(value: unknown): SSHConnectionConfig {
   if (typeof raw.port !== 'number' || !Number.isInteger(raw.port) || raw.port < 1 || raw.port > 65535) throw new Error('Invalid SSH port');
   if (typeof raw.username !== 'string' || raw.username.length < 1 || raw.username.length > 128 || /[\0\r\n]/.test(raw.username)) throw new Error('Invalid SSH username');
   if (raw.authMethod !== 'password' && raw.authMethod !== 'publickey') throw new Error('Invalid authentication method');
-  const allowedFields = new Set(['type', 'host', 'port', 'username', 'authMethod', 'password', 'privateKey', 'keychainId', 'keyPassphrase', 'cols', 'rows', 'term', 'expectedFingerprint', 'mode']);
+  const allowedFields = new Set(['type', 'host', 'port', 'username', 'authMethod', 'password', 'privateKey', 'keychainId', 'keyPassphrase', 'cols', 'rows', 'term', 'expectedFingerprint', 'mode', 'command', 'timeoutMs']);
   if (Object.keys(raw).some((field) => !allowedFields.has(field))) throw new Error('Unsupported connection field');
-  if (raw.mode !== undefined && raw.mode !== 'forward') throw new Error('Invalid connection mode');
+  if (raw.mode !== undefined && (typeof raw.mode !== 'string' || !['forward', 'exec', 'sftp'].includes(raw.mode))) throw new Error('Invalid connection mode');
+  if (raw.mode === 'exec' ? typeof raw.command !== 'string' || !raw.command.length || raw.command.length > 32 * 1024 || raw.command.includes('\0') : raw.command !== undefined) throw new Error('Invalid exec command');
+  if (raw.timeoutMs !== undefined && (typeof raw.timeoutMs !== 'number' || !Number.isInteger(raw.timeoutMs) || raw.timeoutMs < 1000 || raw.timeoutMs > 600_000)) throw new Error('Invalid session timeout');
   const size = normalizeTerminalSize(raw.cols ?? 120, raw.rows ?? 40);
   if (!size) throw new Error('Invalid terminal size');
 
@@ -156,6 +160,9 @@ export function parseConnectMessage(value: unknown): SSHConnectionConfig {
     ...(keychainId ? { keychainId: keychainId as string } : {}),
     ...(keyPassphrase !== undefined ? { keyPassphrase } : {}),
     cols: size.cols, rows: size.rows, term, expectedFingerprint: raw.expectedFingerprint as string | undefined,
-    ...(raw.mode === 'forward' ? { mode: 'forward' as const } : {}),
+    ...(raw.mode ? { mode: raw.mode as SSHConnectionConfig['mode'] } : {}),
+    ...(raw.mode === 'exec' ? { command: raw.command as string } : {}),
+    ...(raw.timeoutMs !== undefined || raw.mode === 'exec' || raw.mode === 'sftp'
+      ? { timeoutMs: (raw.timeoutMs as number | undefined) ?? (raw.mode === 'exec' ? 60_000 : 600_000) } : {}),
   };
 }

@@ -309,6 +309,7 @@ export class SFTPClient {
   private readonly requestTimeoutMs: number;
   private readonly pending = new Map<number, PendingRequest<unknown>>();
   private state: ClientState = 'new';
+  private supportsPosixRename = false;
   private nextRequestId: number;
   private header = new Uint8Array(4);
   private headerLength = 0;
@@ -534,8 +535,11 @@ export class SFTPClient {
     return this.statusRequest(SFTP_PACKET_TYPES.RMDIR, [encodeString(path, 'path')]);
   }
 
-  rename(oldPath: string, newPath: string): Promise<void> {
-    return this.statusRequest(SFTP_PACKET_TYPES.RENAME, [
+  async rename(oldPath: string, newPath: string, overwrite = false): Promise<void> {
+    // v3 RENAME 不覆盖已有目标；仅用协商过的扩展原子替换，不能先删原文件。
+    if (overwrite && !this.supportsPosixRename) throw new Error('SFTP server does not support atomic overwrite (posix-rename@openssh.com)');
+    return this.statusRequest(overwrite ? SFTP_PACKET_TYPES.EXTENDED : SFTP_PACKET_TYPES.RENAME, [
+      ...(overwrite ? [encodeString('posix-rename@openssh.com', 'extension name')] : []),
       encodeString(oldPath, 'old path'),
       encodeString(newPath, 'new path'),
     ]);
@@ -616,6 +620,7 @@ export class SFTPClient {
       extensions.set(name, data);
     }
     reader.assertEnd('VERSION packet');
+    this.supportsPosixRename = extensions.get('posix-rename@openssh.com') === '1';
     this.state = 'ready';
     if (this.initializationTimer) clearTimeout(this.initializationTimer);
     this.initializationTimer = null;

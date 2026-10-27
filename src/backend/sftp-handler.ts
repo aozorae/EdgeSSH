@@ -301,7 +301,7 @@ export class SFTPHandler {
         if (upload.expectedMtime !== undefined && upload.expectedMtime !== null) {
           await this.destinationPermissions(upload.destinationPath, upload.expectedMtime);
         }
-        await this.client.rename(upload.uploadPath, upload.destinationPath);
+        await this.client.rename(upload.uploadPath, upload.destinationPath, true);
       }
       this.upload = null;
       let mtime: number | undefined;
