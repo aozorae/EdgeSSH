@@ -675,6 +675,7 @@ export class FileManager {
       this.showError(this.localize({ zh: '文件名无效。', en: 'The file name is invalid.' }));
       return;
     }
+    this.elements.error.hidden = true;
     const requestId = this.createRequest('readText', path);
     this.editorRequest = { requestId, path, name: entry.name };
     this.setStatus({ zh: `正在读取 ${entry.name}`, en: `Opening ${entry.name}` });
@@ -791,7 +792,7 @@ export class FileManager {
     if (bytes.length > MAX_EDITOR_FILE_SIZE) {
       return reject(this.localize({ zh: '保存失败：内容超过 2 MiB 限制。', en: 'Save failed: the content exceeds the 2 MiB limit.' }));
     }
-    // 基线未知（上次保存后 stat 失败）时不带 expectedMtime，避免拿旧值误报冲突。
+    // A null version is only allowed after the user explicitly confirms an overwrite.
     const mtimeCheck = expectedMtime === undefined ? expectedMtimeFor(document.mtime) : expectedMtime;
     const requestId = this.createRequest('upload', document.path);
     let resolveSave: (completed: boolean) => void = () => undefined;
@@ -1240,7 +1241,6 @@ export class FileManager {
 
   private handleListResult(message: JsonRecord): void {
     const requestId = typeof message.requestId === 'string' ? message.requestId : '';
-    if (this.textRead?.requestId === requestId) this.textRead = null;
     // === Tree-view fetch: route to tree channel, never enter right-side rendering ===
     if (requestId.startsWith('tree-')) {
       this.resolveTreeList(message, requestId);
@@ -1523,8 +1523,7 @@ export class FileManager {
     const mtime = numberValue(message.mtime);
     const savingEditor = state.editorContent !== undefined;
     if (savingEditor && this.editor && this.editorDocument) {
-      // stat 是 best-effort：没带回 mtime 时基线记为未知，下次保存不做冲突校验，
-      // 否则会拿打开时的旧值去比对新 mtime，误报「远端已变更」。
+      // An unavailable post-save version pauses automatic writes until explicitly resolved.
       this.editorDocument.mtime = nextMtimeBaseline(mtime);
       this.editor.markSaved(state.editorContent!, mtime);
     }
@@ -1627,6 +1626,7 @@ export class FileManager {
 
   private handleServerError(message: JsonRecord): void {
     const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+    if (this.textRead?.requestId === requestId) this.textRead = null;
     // === Tree-view fetch error: route to tree channel, never enter right-side error handling ===
     if (requestId.startsWith('tree-')) {
       this.rejectTreeList(message, requestId);

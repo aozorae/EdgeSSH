@@ -71,3 +71,18 @@ test('2 MiB editing never serializes the full document on keystrokes; in-flight 
   expect(result.cleanAfterSave).toBe(true);
   console.log('large-editor-regression', result);
 });
+
+
+test('a failed text stream releases the transfer channel and permits another editor read', async ({ page }) => {
+  const options = { readError: true };
+  await fileFixture(page, options);
+  await connectFiles(page);
+  const row = page.locator('.files-list').getByRole('treeitem', { name: 'README.md', exact: true });
+  await row.dblclick();
+  await expect(page.locator('#file-manager-error')).toHaveText('Read interrupted');
+  await expect(page.locator('#file-edit')).toBeEnabled();
+  options.readError = false;
+  await page.locator('#file-edit').click();
+  await expect(page.locator('.file-editor .cm-content')).toContainText('Edge SSH');
+  await expect(page.locator('#file-manager-error')).toBeHidden();
+});
