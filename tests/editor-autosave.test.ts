@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   AUTOSAVE_DELAY_MS,
+  LARGE_TEXT_LENGTH, editorAutosaveDelay, editorAutosaveInterval,
   AutosaveController,
   type AutosavePhase,
   type AutosaveTimerHost,
@@ -163,4 +164,54 @@ test('cancel 清掉计时器，关闭编辑器后不会再有迟到的保存', (
   assert.equal(harness.controller.current, 'idle');
   timers.advance(60_000);
   assert.equal(harness.saves.length, 0);
+});
+
+test('large-file autosave has a 15s debounce and 30s minimum start interval', () => {
+  const timers = new FakeTimers();
+  let length = LARGE_TEXT_LENGTH;
+  const starts: number[] = [];
+  const controller = new AutosaveController({
+    timers: timers.host, now: () => timers.now,
+    delayMs: () => editorAutosaveDelay(length),
+    minIntervalMs: () => editorAutosaveInterval(length),
+    save: () => { starts.push(timers.now); controller.beginSaving(); },
+  });
+  controller.schedule();
+  timers.advance(14_999);
+  assert.deepEqual(starts, []);
+  timers.advance(1);
+  controller.succeed();
+  controller.schedule();
+  timers.advance(29_999);
+  assert.deepEqual(starts, [15_000]);
+  timers.advance(1);
+  assert.deepEqual(starts, [15_000, 45_000]);
+  controller.succeed();
+  length = 1;
+  controller.schedule();
+  timers.advance(9_999);
+  assert.equal(starts.length, 2);
+  timers.advance(1);
+  assert.deepEqual(starts, [15_000, 45_000, 55_000]);
+  controller.cancel();
+  timers.advance(120_000);
+  assert.equal(starts.length, 3);
+});
+
+test('manual saves bypass the timer but still rate-limit the next autosave', () => {
+  const timers = new FakeTimers();
+  let saves = 0;
+  const controller = new AutosaveController({
+    timers: timers.host, now: () => timers.now,
+    minIntervalMs: 30_000, save: () => { saves++; },
+  });
+  controller.schedule();
+  timers.advance(100);
+  controller.beginSaving();
+  controller.schedule();
+  controller.succeed();
+  timers.advance(29_999);
+  assert.equal(saves, 0);
+  timers.advance(1);
+  assert.equal(saves, 1);
 });

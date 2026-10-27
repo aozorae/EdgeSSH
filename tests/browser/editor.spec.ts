@@ -104,7 +104,7 @@ test('mtime 冲突：先阻止覆盖，取消保留草稿，确认后才强制�
   await expect(editor.locator('.file-editor-state')).toHaveText('已保存');
   const starts = fixture.calls.filter((call) => call.type === 'sftp_upload_start');
   // 两次带 expectedMtime 的尝试都被拒绝（第一次取消、第二次确认后强制覆盖），最后一条才真正写入。
-  expect(starts.map((call) => call.expectedMtime)).toEqual([READ_MTIME, READ_MTIME, undefined]);
+  expect(starts.map((call) => call.expectedMtime)).toEqual([READ_MTIME, READ_MTIME, null]);
   expect(fixture.textFiles.get('/root/README.md')!.content).toBe('# Conflict draft\n');
 });
 
@@ -172,7 +172,7 @@ test('自动保存：停止输入 3 秒后写入远端，连续输入合并为�
   await content.click();
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.insertText('autosave-one');
-  await expect(badge).toHaveText('3 秒后自动保存');
+  await expect(badge).toHaveText('等待自动保存');
   await expect(editor.locator('.file-editor-state')).toHaveText('未保存');
 
   // 1.5 秒后再输入：防抖重新计时，不会提前保存。
@@ -223,9 +223,9 @@ test('自动保存冲突：暂停并提示，选择以远端为准后重新载�
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.insertText('draft against conflict');
 
-  // 3 秒后自动保存被 mtime 校验拒绝：暂停、提示，绝不静默覆盖。
-  await expect(editor).toHaveAttribute('data-autosave', 'paused', { timeout: 8_000 });
-  await expect(editor.locator('.file-editor-autosave')).toHaveText('自动保存已暂停 · 远端已变更');
+  // 等待自动保存被 mtime 校验拒绝：暂停、提示，绝不静默覆盖。
+  await expect(editor).toHaveAttribute('data-autosave', 'paused', { timeout: 15_000 });
+  await expect(editor.locator('.file-editor-autosave')).toHaveText('自动保存已暂停 · 请确认远端版本');
   expect(fixture.textFiles.get('/root/README.md')!.content).toContain('<script>');
 
   // 放弃我的修改 → 以远端为准重新读取，自动保存恢复。
@@ -237,7 +237,7 @@ test('自动保存冲突：暂停并提示，选择以远端为准后重新载�
   await content.click();
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.insertText('after remote reload');
-  await expect(editor.locator('.file-editor-state')).toHaveText('已保存', { timeout: 8_000 });
+  await expect(editor.locator('.file-editor-state')).toHaveText('已保存', { timeout: 15_000 });
   expect(fixture.textFiles.get('/root/README.md')!.content).toBe('after remote reload');
 });
 
@@ -254,7 +254,7 @@ test('自动保存冲突：强制覆盖成功后自动保存恢复', async ({ pa
   await content.click();
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.insertText('keep my version');
-  await expect(editor).toHaveAttribute('data-autosave', 'paused', { timeout: 8_000 });
+  await expect(editor).toHaveAttribute('data-autosave', 'paused', { timeout: 15_000 });
 
   // 保留我的版本 → expectedMtime 置 null 强制覆盖。
   await answerConfirm(page, true);
@@ -266,12 +266,12 @@ test('自动保存冲突：强制覆盖成功后自动保存恢复', async ({ pa
   await content.click();
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.insertText('second autosave');
-  await expect(editor.locator('.file-editor-state')).toHaveText('已保存', { timeout: 8_000 });
+  await expect(editor.locator('.file-editor-state')).toHaveText('已保存', { timeout: 15_000 });
   const starts = fixture.calls.filter((call) => call.type === 'sftp_upload_start');
   // [0] 冲突被拒 → [1] 强制覆盖（不带 expectedMtime）→ [2] 恢复后的自动保存。
   expect(starts).toHaveLength(3);
   expect(starts[0].expectedMtime).toBe(READ_MTIME);
-  expect(starts[1].expectedMtime).toBeUndefined();
+  expect(starts[1].expectedMtime).toBeNull();
   expect(starts[2].expectedMtime).toBe(READ_MTIME + 61);
   expect(fixture.textFiles.get('/root/README.md')!.content).toBe('second autosave');
 });
@@ -302,31 +302,25 @@ test('预览态下 Ctrl/Cmd+S 仍然保存', async ({ page }) => {
   expect(fixture.textFiles.get('/root/README.md')!.content).toBe('# Saved from preview\n');
 });
 
-test('保存成功但没有 mtime：下次保存不带 expectedMtime', async ({ page }) => {
+test('missing save mtime pauses autosave and requires explicit overwrite', async ({ page }) => {
   const fixture = await fileFixture(page, { omitUploadMtime: true });
   await connectFiles(page);
   await page.locator('.files-list').getByRole('treeitem', { name: 'README.md', exact: true }).dblclick();
   const editor = page.locator('.file-editor');
-  const content = editor.locator('.cm-content');
-  await expect(editor).toBeVisible();
-
-  await content.click();
+  await editor.locator('.cm-content').click();
   await page.keyboard.press('ControlOrMeta+a');
-  await page.keyboard.insertText('first save\n');
+  await page.keyboard.insertText('first save');
   await page.keyboard.press('ControlOrMeta+s');
-  await expect(editor.locator('.file-editor-state')).toHaveText('已保存');
-
-  // 后端 stat 失败时基线必须转为「未知」，否则第二次保存会拿打开时的旧 mtime
-  // 去比对新 mtime，把自己刚写的内容误报成「远端已变更」。
-  await content.click();
-  await page.keyboard.press('ControlOrMeta+a');
-  await page.keyboard.insertText('second save\n');
+  await expect(editor).toHaveAttribute('data-autosave', 'paused');
+  await page.keyboard.insertText(' again');
+  await page.waitForTimeout(3_100);
+  expect(fixture.calls.filter((call) => call.type === 'sftp_upload_start')).toHaveLength(1);
+  const dialog = page.waitForEvent('dialog').then((event) => event.accept());
   await page.keyboard.press('ControlOrMeta+s');
+  await dialog;
   await expect(editor.locator('.file-editor-state')).toHaveText('已保存');
-
   const starts = fixture.calls.filter((call) => call.type === 'sftp_upload_start');
-  expect(starts.map((call) => call.expectedMtime)).toEqual([READ_MTIME, undefined]);
-  expect(fixture.textFiles.get('/root/README.md')!.content).toBe('second save\n');
+  expect(starts.map((call) => call.expectedMtime)).toEqual([READ_MTIME, null]);
 });
 
 test('非全屏 Esc 关闭编辑器，连接面板不被连带关掉', async ({ page }) => {

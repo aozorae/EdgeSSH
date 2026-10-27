@@ -5,7 +5,7 @@
  * 因此不会进入首屏 / 终端首屏 chunk。语言包与 markdown 预览依赖（marked、
  * DOMPurify）同样在真正打开对应文件时才加载。
  */
-import { EditorState, type Extension } from '@codemirror/state';
+import { EditorState, type Extension, type Text } from '@codemirror/state';
 import {
   EditorView,
   drawSelection,
@@ -26,7 +26,7 @@ import {
   syntaxHighlighting,
 } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
-import { AutosaveController, type AutosavePhase } from './autosave';
+import { AutosaveController, editorAutosaveDelay, editorAutosaveInterval, type AutosavePhase } from './autosave';
 import { editorLanguageFor, isMarkdownFile } from './file-language';
 import './file-editor.css';
 
@@ -205,9 +205,9 @@ const COPY: Record<keyof EditorCopy, LocalizedText> = {
   empty: { zh: '文件为空', en: 'Empty file' },
   fullscreen: { zh: '全屏', en: 'Fullscreen' },
   exitFullscreen: { zh: '还原', en: 'Exit fullscreen' },
-  autosavePending: { zh: '3 秒后自动保存', en: 'Auto-save in 3s' },
+  autosavePending: { zh: '等待自动保存', en: 'Auto-save pending' },
   autosaveSaving: { zh: '自动保存中…', en: 'Auto-saving…' },
-  autosavePaused: { zh: '自动保存已暂停 · 远端已变更', en: 'Auto-save paused · remote changed' },
+  autosavePaused: { zh: '自动保存已暂停 · 请确认远端版本', en: 'Auto-save paused · verify remote version' },
 };
 
 export class FileEditor {
@@ -232,7 +232,9 @@ export class FileEditor {
   private readonly preview: HTMLElement;
   private readonly markdown: boolean;
   private view: EditorView | null = null;
-  private savedContent: string;
+  private savedDocument: Text | null = null;
+  private savingDocument: Text | null = null;
+  private dirty = false;
   private saving = false;
   private previewing = false;
   private disposed = false;
@@ -251,11 +253,12 @@ export class FileEditor {
   private constructor(options: FileEditorOptions, file: EditorDocument) {
     this.options = options;
     this.file = file;
-    this.savedContent = file.content;
     this.markdown = isMarkdownFile(file.name);
     this.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     this.autosave = new AutosaveController({
       save: () => this.runAutoSave(),
+      delayMs: () => editorAutosaveDelay(this.view?.state.doc.length ?? 0),
+      minIntervalMs: () => editorAutosaveInterval(this.view?.state.doc.length ?? 0),
       onPhaseChange: (phase) => {
         this.autosavePhase = phase;
         this.renderAutosave();
@@ -340,6 +343,10 @@ export class FileEditor {
       theme,
       EditorView.updateListener.of((update) => {
         if (!update.docChanged || this.applyingRemote) return;
+        this.dirty = update.state.doc !== this.savedDocument;
+        if (update.transactions.some((transaction) => transaction.isUserEvent('undo') || transaction.isUserEvent('redo'))) {
+          this.dirty = !this.savedDocument?.eq(update.state.doc);
+        }
         this.statusOverride = null;
         // 停止输入 3 秒后自动保存；保存期间的输入由状态机合并。
         this.autosave.schedule();
@@ -358,17 +365,17 @@ export class FileEditor {
       state: EditorState.create({ doc: this.file.content, extensions }),
       parent: this.host,
     });
+    this.savedDocument = this.view.state.doc;
     this.renderState();
   }
 
   /** 当前编辑区内容与最后一次保存内容不一致。 */
   isDirty(): boolean {
-    if (!this.view) return false;
-    return this.view.state.doc.toString() !== this.savedContent;
+    return this.dirty;
   }
 
   content(): string {
-    return this.view?.state.doc.toString() ?? this.file.content;
+    return this.view?.state.sliceDoc() ?? this.file.content;
   }
 
   isSaving(): boolean {
@@ -380,6 +387,7 @@ export class FileEditor {
   }
 
   markSaving(): void {
+    this.savingDocument = this.view?.state.doc ?? null;
     this.saving = true;
     this.statusOverride = null;
     this.autosave.beginSaving();
@@ -388,12 +396,15 @@ export class FileEditor {
 
   markSaved(content: string, mtime: number | null): void {
     this.saving = false;
-    this.savedContent = content;
+    this.savedDocument = this.savingDocument;
+    this.savingDocument = null;
+    this.dirty = this.view !== null && !this.savedDocument?.eq(this.view.state.doc);
     if (mtime !== null) this.file.mtime = mtime;
     // 保存期间又有输入时不能显示「已保存」，等合并的那次保存完成。
     this.statusOverride = this.isDirty() ? null : { saved: true };
     // 成功即恢复自动保存（含强制覆盖后解除暂停）；有合并输入会再排一次。
-    this.autosave.succeed();
+    if (mtime === null) this.autosave.pause();
+    else this.autosave.succeed();
     this.renderState();
   }
 
@@ -444,7 +455,9 @@ export class FileEditor {
     } finally {
       this.applyingRemote = false;
     }
-    this.savedContent = content;
+    this.savedDocument = this.view.state.doc;
+    this.savingDocument = null;
+    this.dirty = false;
     this.file.mtime = mtime;
     this.saving = false;
     this.statusOverride = null;
@@ -531,9 +544,15 @@ export class FileEditor {
       : phase === 'saving' ? copy.autosaveSaving : copy.autosavePending);
   }
 
+  private reconcileDirty(): boolean {
+    if (this.view && this.savedDocument) this.dirty = !this.savedDocument.eq(this.view.state.doc);
+    this.renderState();
+    return this.dirty;
+  }
+
   private requestSave(): void {
     if (this.disposed || this.saving || !this.view) return;
-    if (!this.isDirty()) return;
+    if (!this.reconcileDirty()) return;
     this.options.requestSave(this.content(), 'manual');
   }
 
@@ -543,7 +562,7 @@ export class FileEditor {
       this.autosave.cancel();
       return;
     }
-    if (!this.isDirty()) {
+    if (!this.reconcileDirty()) {
       this.autosave.succeed();
       return;
     }

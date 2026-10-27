@@ -17,7 +17,7 @@ interface DashboardActions {
   refresh(): Promise<CloudHost[]>;
   connect(host: CloudHost): Promise<void>;
   quickConnect(): void;
-  leaveWorkspace(): void;
+  leaveWorkspace(force?: boolean): Promise<boolean>;
 }
 
 const icons = {
@@ -143,9 +143,9 @@ export class Dashboard {
     this.dialog.addEventListener('close', () => { this.form.reset(); this.editing = undefined; this.returnFocus?.focus(); });
     this.get('#host-search').addEventListener('input', () => this.renderList());
     this.get('#refresh-hosts').addEventListener('click', () => void this.refresh());
-    for (const id of ['#rail-overview', '#rail-hosts']) this.get(id).addEventListener('click', () => {
+    for (const id of ['#rail-overview', '#rail-hosts']) this.get(id).addEventListener('click', async () => {
       if (!this.actions.files.confirmLeave()) return;
-      if (!this.isHome) this.actions.leaveWorkspace();
+      if (!this.isHome && !(await this.actions.leaveWorkspace())) return;
       this.show();
       if (id === '#rail-hosts') this.get<HTMLInputElement>('#host-search').focus();
     });
@@ -153,9 +153,9 @@ export class Dashboard {
     this.get('#rail-snippets').addEventListener('click', () => this.showSnippets());
     this.get('#rail-keychain').addEventListener('click', () => this.showKeychain());
     this.get('#rail-forward').addEventListener('click', () => this.showForwarding());
-    for (const id of ['#quick-connect', '#bottom-quick']) this.get(id).addEventListener('click', () => {
+    for (const id of ['#quick-connect', '#bottom-quick']) this.get(id).addEventListener('click', async () => {
       if (this.busy || !this.actions.files.confirmLeave()) return;
-      this.actions.leaveWorkspace();
+      if (!(await this.actions.leaveWorkspace())) return;
       this.openWorkspace(); this.actions.quickConnect();
     });
     this.field('authMethod').addEventListener('change', () => this.updateCredentialFields());
@@ -188,9 +188,10 @@ export class Dashboard {
     });
     const back = document.createElement('button');
     back.className = 'icon-button home-back'; back.textContent = '← 主机总览'; back.type = 'button';
-    back.addEventListener('click', () => {
+    back.addEventListener('click', async () => {
       if (!this.actions.files.confirmLeave()) return;
-      this.actions.leaveWorkspace(); this.show(); void this.refresh();
+      if (!(await this.actions.leaveWorkspace())) return;
+      this.show(); void this.refresh();
     });
     document.querySelector('#app .topbar-actions')!.prepend(back);
     const files = document.createElement('button');
@@ -342,7 +343,8 @@ export class Dashboard {
   }
 
   private signedOut(): void {
-    this.actions.leaveWorkspace();
+    // Authentication revocation must not be blocked by an unsavable draft.
+    void this.actions.leaveWorkspace(true);
     this.actions.snippets.clear();
     this.actions.keychain.clear();
     this.authenticated = false;

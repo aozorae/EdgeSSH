@@ -4,11 +4,11 @@ import { UNKNOWN_MTIME, expectedMtimeFor, nextMtimeBaseline } from '../frontend/
 
 const READ_MTIME = 1_790_100_000;
 
-test('保存成功但 stat 失败（无 mtime）：基线转为未知，下次保存不带 expectedMtime', () => {
+test('保存成功但 stat 失败（无 mtime）：基线转为未知，下次保存必须先确认覆盖', () => {
   // finishUpload 的 stat 失败 → sftp_upload_complete 不带 mtime。
   const baseline = nextMtimeBaseline(null);
   assert.equal(baseline, UNKNOWN_MTIME);
-  // 下一次保存不校验，才不会拿打开时的旧 mtime 误报「远端已变更」。
+  // FileManager treats null as requiring explicit user confirmation.
   assert.equal(expectedMtimeFor(baseline), null);
 });
 

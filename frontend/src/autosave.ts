@@ -14,6 +14,11 @@
 export type AutosavePhase = 'idle' | 'pending' | 'saving' | 'paused';
 
 export const AUTOSAVE_DELAY_MS = 3_000;
+export const LARGE_TEXT_LENGTH = 128 * 1024;
+
+// Document length is available in O(1); do not encode the whole file on input.
+export const editorAutosaveDelay = (length: number): number => length >= LARGE_TEXT_LENGTH ? 15_000 : AUTOSAVE_DELAY_MS;
+export const editorAutosaveInterval = (length: number): number => length >= LARGE_TEXT_LENGTH ? 30_000 : 10_000;
 
 export interface AutosaveTimerHost {
   set(callback: () => void, delayMs: number): number;
@@ -24,7 +29,9 @@ export interface AutosaveOptions {
   /** 到点后执行的保存动作，必须是幂等的：内容未变时自行跳过。 */
   save: () => void;
   onPhaseChange?: (phase: AutosavePhase) => void;
-  delayMs?: number;
+  delayMs?: number | (() => number);
+  minIntervalMs?: number | (() => number);
+  now?: () => number;
   timers?: AutosaveTimerHost;
 }
 
@@ -36,7 +43,7 @@ const defaultTimers: AutosaveTimerHost = {
 export class AutosaveController {
   private readonly options: AutosaveOptions;
   private readonly timers: AutosaveTimerHost;
-  private readonly delayMs: number;
+  private lastStarted = -Infinity;
   private phase: AutosavePhase = 'idle';
   private timer: number | null = null;
   /** saving 期间是否又收到过输入：成功后用它决定是否再存一次。 */
@@ -45,7 +52,6 @@ export class AutosaveController {
   constructor(options: AutosaveOptions) {
     this.options = options;
     this.timers = options.timers ?? defaultTimers;
-    this.delayMs = options.delayMs ?? AUTOSAVE_DELAY_MS;
   }
 
   get current(): AutosavePhase {
@@ -64,6 +70,7 @@ export class AutosaveController {
 
   /** 保存（自动或手动）真正开始。 */
   beginSaving(): void {
+    this.lastStarted = this.now();
     this.clearTimer();
     this.changedDuringSave = false;
     this.setPhase('saving');
@@ -114,16 +121,21 @@ export class AutosaveController {
     this.setPhase('idle');
   }
 
+  private now(): number { return this.options.now?.() ?? Date.now(); }
+
   private arm(): void {
     this.clearTimer();
     this.setPhase('pending');
+    const delay = typeof this.options.delayMs === 'function' ? this.options.delayMs() : this.options.delayMs ?? AUTOSAVE_DELAY_MS;
+    const interval = typeof this.options.minIntervalMs === 'function' ? this.options.minIntervalMs() : this.options.minIntervalMs ?? 0;
     this.timer = this.timers.set(() => {
       this.timer = null;
       if (this.phase !== 'pending') return;
       this.changedDuringSave = false;
       this.setPhase('saving');
+      this.lastStarted = this.now();
       this.options.save();
-    }, this.delayMs);
+    }, Math.max(delay, interval - (this.now() - this.lastStarted)));
   }
 
   private clearTimer(): void {

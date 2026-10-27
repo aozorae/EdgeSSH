@@ -46,3 +46,25 @@ export function decodeTextFile(bytes: Uint8Array): string {
     throw new TextFileError('encoding', 'File is not valid UTF-8 text');
   }
 }
+
+/** Incremental validation keeps the Worker read buffer at one SFTP chunk. */
+export class TextFileDecoder {
+  private readonly decoder = new TextDecoder('utf-8', { fatal: true });
+  private size = 0;
+
+  push(chunk: Uint8Array): void {
+    assertTextFileSize(this.size + chunk.length);
+    if (this.size < BINARY_SNIFF_BYTES && hasBinaryPrefix(chunk.subarray(0, BINARY_SNIFF_BYTES - this.size))) {
+      throw new TextFileError('binary', 'File appears to be binary');
+    }
+    this.size += chunk.length;
+    this.decode(chunk);
+  }
+
+  finish(): void { this.decode(); }
+
+  private decode(chunk?: Uint8Array): void {
+    try { this.decoder.decode(chunk, { stream: chunk !== undefined }); }
+    catch { throw new TextFileError('encoding', 'File is not valid UTF-8 text'); }
+  }
+}

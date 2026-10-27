@@ -77,17 +77,22 @@ function setup() {
   return { client, messages, binary, handler };
 }
 
-test('sftp_read_text 返回正文、大小与 mtime', async () => {
-  const { client, messages, handler } = setup();
+test('editor read uses bounded binary chunks and small control messages', async () => {
+  const { client, messages, binary, handler } = setup();
+  client.content = new TextEncoder().encode('a'.repeat(MAX_TEXT_FILE_SIZE));
+  client.attrs.size = client.content.length;
   await handler.readText('r1', '/root/app.ts');
-  assert.equal(messages.length, 1);
-  const [message] = messages;
+  assert.equal(messages[0].type, 'sftp_read_text_start');
+  const message = messages.at(-1)!;
   assert.equal(message.type, 'sftp_read_text_result');
   assert.equal(message.requestId, 'r1');
-  assert.equal(message.path, '/root/app.ts');
-  assert.equal(message.content, 'hello world\n');
-  assert.equal(message.size, 12);
+  assert.equal(message.content, undefined);
+  assert.equal(message.size, MAX_TEXT_FILE_SIZE);
   assert.equal(message.mtime, 1000);
+  assert.equal(binary.length, 32);
+  assert.ok(binary.every((chunk) => chunk.length <= 64 * 1024));
+  assert.ok(messages.every((item) => JSON.stringify(item).length < 1024));
+  assert.deepEqual(Buffer.concat(binary), Buffer.from(client.content));
   assert.equal(client.opened[0].flags, SFTP_OPEN_FLAGS.READ);
 });
 
@@ -106,8 +111,8 @@ test('前 8 KiB 含 NUL 的文件按二进制拒绝', async () => {
   client.content = new Uint8Array([0x68, 0x69, 0x00, 0x21]);
   client.attrs = { size: 4, mtime: 1, permissions: 0o100644 };
   await handler.readText('r3', '/root/blob.txt');
-  assert.equal(messages[0].type, 'sftp_error');
-  assert.equal(messages[0].reason, 'binary');
+  assert.equal(messages.at(-1)!.type, 'sftp_error');
+  assert.equal(messages.at(-1)!.reason, 'binary');
 });
 
 test('严格 UTF-8 解码失败的文件被拒绝', async () => {
@@ -115,8 +120,8 @@ test('严格 UTF-8 解码失败的文件被拒绝', async () => {
   client.content = new Uint8Array([0xff, 0xfe, 0x41]);
   client.attrs = { size: 3, mtime: 1, permissions: 0o100644 };
   await handler.readText('r4', '/root/latin.txt');
-  assert.equal(messages[0].type, 'sftp_error');
-  assert.equal(messages[0].reason, 'encoding');
+  assert.equal(messages.at(-1)!.type, 'sftp_error');
+  assert.equal(messages.at(-1)!.reason, 'encoding');
 });
 
 test('expectedMtime 不一致时拒绝写入，且不创建临时文件', async () => {
@@ -187,4 +192,41 @@ test('非 overwrite 上传不 stat 目标、不建临时文件', async () => {
   assert.equal(messages[0].type, 'sftp_upload_ready');
   assert.equal(client.statCalls.length, 0);
   assert.equal(client.opened[0].path, '/root/new.txt');
+});
+
+test('remote changes during upload are rechecked before rename', async () => {
+  const { client, messages, handler } = setup();
+  await handler.startUpload('race', '/root/app.ts', 1, true, 1000);
+  await handler.uploadChunk(new Uint8Array([65]));
+  client.attrs.mtime = 1001;
+  await handler.finishUpload('race');
+  assert.equal(messages.at(-1)!.conflict, true);
+  assert.equal(client.renames.length, 0);
+  assert.equal(client.removed.length, 1);
+});
+
+test('ordinary uploads do not request editor-only post-write metadata', async () => {
+  const { client, messages, handler } = setup();
+  await handler.startUpload('plain', '/root/new.txt', 1, false);
+  await handler.uploadChunk(new Uint8Array([65]));
+  await handler.finishUpload('plain');
+  assert.equal(client.statCalls.length, 0);
+  assert.equal(messages.at(-1)!.type, 'sftp_upload_complete');
+  assert.equal(messages.at(-1)!.mtime, undefined);
+});
+
+test('explicit forced editor save still reports a new mtime', async () => {
+  const { messages, handler } = setup();
+  await handler.startUpload('force', '/root/app.ts', 1, true, null);
+  await handler.uploadChunk(new Uint8Array([65]));
+  await handler.finishUpload('force');
+  assert.equal(messages.at(-1)!.mtime, 1000);
+});
+
+test('truncated text is not presented as a complete editable document', async () => {
+  const { client, messages, handler } = setup();
+  client.attrs.size = 100;
+  await handler.readText('short', '/root/app.ts');
+  assert.equal(messages.at(-1)!.type, 'sftp_error');
+  assert.ok(!messages.some((item) => item.type === 'sftp_read_text_result'));
 });

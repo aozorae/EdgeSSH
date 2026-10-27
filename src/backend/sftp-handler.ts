@@ -9,7 +9,7 @@ import {
   type SFTPAttrs,
   type SFTPDirEntry,
 } from '../ssh/sftp';
-import { MAX_TEXT_FILE_SIZE, TextFileError, assertTextFileSize, decodeTextFile } from './text-file';
+import { TextFileError, assertTextFileSize, TextFileDecoder } from './text-file';
 
 const MAX_PATH_BYTES = 4096;
 const MAX_DIRECTORY_ENTRIES = 2000;
@@ -31,6 +31,7 @@ interface UploadState {
   handle: Uint8Array;
   handleClosed: boolean;
   temporary: boolean;
+  expectedMtime?: number | null;
 }
 
 interface DownloadState {
@@ -194,48 +195,41 @@ export class SFTPHandler {
     if (this.activeDownload?.requestId === requestId) this.activeDownload.cancelled = true;
   }
 
-  /** 读取在线编辑器所需的文本文件；正文走 JSON 控制消息，调用方已按 16 KiB 上限放行结果。 */
+  /** Stream editor text over the existing binary SFTP socket, with bounded validation. */
   async readText(requestId: string, path: string): Promise<void> {
     let handle: Uint8Array | null = null;
+    const download: DownloadState = { requestId, cancelled: false };
     try {
       this.assertReady();
       this.validatePath(path);
+      if (this.activeDownload) throw new Error('Another download is already in progress');
+      this.activeDownload = download;
       const attrs = await this.client.stat(path);
       const size = this.safeSize(attrs);
       assertTextFileSize(size);
       handle = await this.client.openFile(path, SFTP_OPEN_FLAGS.READ);
-      const chunks: Uint8Array[] = [];
+      this.assertDownloadActive(download);
+      this.sendJSON({ type: 'sftp_read_text_start', requestId, path });
+      const decoder = new TextFileDecoder();
       let offset = 0;
       while (size === null || offset < size) {
+        this.assertDownloadActive(download);
         const length = size === null ? TRANSFER_CHUNK_SIZE : Math.min(TRANSFER_CHUNK_SIZE, size - offset);
-        if (length === 0) break;
         const chunk = await this.client.readFile(handle, offset, length);
+        this.assertDownloadActive(download);
         if (chunk === null || chunk.length === 0) break;
-        if (offset + chunk.length > MAX_TEXT_FILE_SIZE) {
-          throw new TextFileError('too-large', 'File exceeds the 2 MiB editor limit');
-        }
-        chunks.push(chunk);
+        decoder.push(chunk);
+        this.sendBinary(chunk);
         offset += chunk.length;
       }
-      const bytes = new Uint8Array(offset);
-      let written = 0;
-      for (const chunk of chunks) {
-        bytes.set(chunk, written);
-        written += chunk.length;
-      }
-      const content = decodeTextFile(bytes);
-      this.sendJSON({
-        type: 'sftp_read_text_result',
-        requestId,
-        path,
-        content,
-        size: offset,
-        mtime: attrs.mtime ?? 0,
-      });
+      decoder.finish();
+      if (size !== null && offset !== size) throw new Error('File changed or was truncated while reading');
+      this.sendJSON({ type: 'sftp_read_text_result', requestId, path, size: offset, mtime: attrs.mtime ?? null });
     } catch (error) {
       this.reportError('read', error, requestId);
     } finally {
       if (handle) await this.client.closeHandle(handle).catch(() => undefined);
+      if (this.activeDownload === download) this.activeDownload = null;
     }
   }
 
@@ -268,6 +262,7 @@ export class SFTPHandler {
         handle,
         handleClosed: false,
         temporary: overwrite,
+        expectedMtime,
       };
       this.sendJSON({ type: 'sftp_upload_ready', requestId, path, size });
     } catch (error) {
@@ -302,13 +297,18 @@ export class SFTPHandler {
       if (upload.received !== upload.size) throw new Error('Upload ended before the declared size was received');
       await this.client.closeHandle(upload.handle);
       upload.handleClosed = true;
-      if (upload.temporary) await this.client.rename(upload.uploadPath, upload.destinationPath);
+      if (upload.temporary) {
+        if (upload.expectedMtime !== undefined && upload.expectedMtime !== null) {
+          await this.destinationPermissions(upload.destinationPath, upload.expectedMtime);
+        }
+        await this.client.rename(upload.uploadPath, upload.destinationPath);
+      }
       this.upload = null;
       let mtime: number | undefined;
       try {
-        const attrs = await this.client.stat(upload.destinationPath);
+        const attrs: SFTPAttrs = upload.expectedMtime === undefined ? { flags: 0 } : await this.client.stat(upload.destinationPath);
         if (typeof attrs.mtime === 'number') mtime = attrs.mtime;
-      } catch { /* Best effort: callers refresh the listing anyway. */ }
+      } catch { /* An unknown version pauses editor autosave until the user confirms. */ }
       this.sendJSON({
         type: 'sftp_upload_complete', requestId, path: upload.destinationPath, size: upload.received,
         ...(mtime === undefined ? {} : { mtime }),

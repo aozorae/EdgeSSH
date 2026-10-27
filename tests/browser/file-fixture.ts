@@ -12,7 +12,7 @@ const entry = (name: string, type = 'file', size = 12) => ({
 });
 
 // 只在测试浏览器内模拟 API/协议，不访问真实主机、不增加生产认证绕过。
-export async function fileFixture(page: Page, options: { firstSeen?: boolean; credentialError?: boolean; noHosts?: boolean; holdUpload?: boolean; omitUploadMtime?: boolean } = {}) {
+export async function fileFixture(page: Page, options: { firstSeen?: boolean; credentialError?: boolean; noHosts?: boolean; holdUpload?: boolean; omitUploadMtime?: boolean; saveError?: boolean } = {}) {
   const hosts = options.noHosts ? [] : [host('alpha', 'Tokyo production', '192.0.2.10'), host('beta', 'Singapore backup', '192.0.2.20')];
   const directories = new Map([
     ['/', [entry('root', 'directory')]],
@@ -95,12 +95,15 @@ export async function fileFixture(page: Page, options: { firstSeen?: boolean; cr
       if (type === 'sftp_read_text') {
         const file = textFiles.get(path);
         if (!file) send({ type: 'sftp_error', requestId, operation: 'read', message: 'No such file' });
-        else send({
-          type: 'sftp_read_text_result', requestId, path,
-          content: file.content, size: Buffer.byteLength(file.content), mtime: file.mtime,
-        });
+        else {
+          const bytes = Buffer.from(file.content);
+          send({ type: 'sftp_read_text_start', requestId, path });
+          for (let offset = 0; offset < bytes.length; offset += 64 * 1024) ws.send(bytes.subarray(offset, offset + 64 * 1024));
+          send({ type: 'sftp_read_text_result', requestId, path, size: bytes.length, mtime: file.mtime });
+        }
       }
       if (type === 'sftp_upload_start') {
+        if (options.saveError) { send({ type: 'sftp_error', requestId, operation: 'upload', message: 'Permission denied' }); return; }
         const target = textFiles.get(path);
         if (typeof message.expectedMtime === 'number' && (!target || target.mtime !== message.expectedMtime)) {
           send({ type: 'sftp_error', requestId, operation: 'upload', conflict: true, message: 'The remote file changed since it was opened' });
