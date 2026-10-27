@@ -1,0 +1,69 @@
+diff --git a/frontend/src/file-manager.ts b/frontend/src/file-manager.ts
+index d7df277..414b089 100644
+--- a/frontend/src/file-manager.ts
++++ b/frontend/src/file-manager.ts
+@@ -792,5 +792,5 @@ export class FileManager {
+       return reject(this.localize({ zh: '保存失败：内容超过 2 MiB 限制。', en: 'Save failed: the content exceeds the 2 MiB limit.' }));
+     }
+-    // 基线未知（上次保存后 stat 失败）时不带 expectedMtime，避免拿旧值误报冲突。
++    // A null version is only allowed after the user explicitly confirms an overwrite.
+     const mtimeCheck = expectedMtime === undefined ? expectedMtimeFor(document.mtime) : expectedMtime;
+     const requestId = this.createRequest('upload', document.path);
+@@ -1241,5 +1241,4 @@ export class FileManager {
+   private handleListResult(message: JsonRecord): void {
+     const requestId = typeof message.requestId === 'string' ? message.requestId : '';
+-    if (this.textRead?.requestId === requestId) this.textRead = null;
+     // === Tree-view fetch: route to tree channel, never enter right-side rendering ===
+     if (requestId.startsWith('tree-')) {
+@@ -1524,6 +1523,5 @@ export class FileManager {
+     const savingEditor = state.editorContent !== undefined;
+     if (savingEditor && this.editor && this.editorDocument) {
+-      // stat 是 best-effort：没带回 mtime 时基线记为未知，下次保存不做冲突校验，
+-      // 否则会拿打开时的旧值去比对新 mtime，误报「远端已变更」。
++      // An unavailable post-save version pauses automatic writes until explicitly resolved.
+       this.editorDocument.mtime = nextMtimeBaseline(mtime);
+       this.editor.markSaved(state.editorContent!, mtime);
+@@ -1628,4 +1626,5 @@ export class FileManager {
+   private handleServerError(message: JsonRecord): void {
+     const requestId = typeof message.requestId === 'string' ? message.requestId : '';
++    if (this.textRead?.requestId === requestId) this.textRead = null;
+     // === Tree-view fetch error: route to tree channel, never enter right-side error handling ===
+     if (requestId.startsWith('tree-')) {
+diff --git a/tests/browser/editor-regressions.spec.ts b/tests/browser/editor-regressions.spec.ts
+index 7d8b66b..70d6524 100644
+--- a/tests/browser/editor-regressions.spec.ts
++++ b/tests/browser/editor-regressions.spec.ts
+@@ -72,2 +72,16 @@ test('2 MiB editing never serializes the full document on keystrokes; in-flight
+   console.log('large-editor-regression', result);
+ });
++
++
++test('a failed text stream releases the transfer channel and permits another editor read', async ({ page }) => {
++  const options = { readError: true };
++  await fileFixture(page, options);
++  await connectFiles(page);
++  const row = page.locator('.files-list').getByRole('treeitem', { name: 'README.md', exact: true });
++  await row.dblclick();
++  await expect(page.locator('#file-manager-error')).toHaveText('Read interrupted');
++  await expect(page.locator('#file-edit')).toBeEnabled();
++  options.readError = false;
++  await row.dblclick();
++  await expect(page.locator('.file-editor .cm-content')).toContainText('Edge SSH');
++});
+diff --git a/tests/browser/file-fixture.ts b/tests/browser/file-fixture.ts
+index d6d5486..425f2c5 100644
+--- a/tests/browser/file-fixture.ts
++++ b/tests/browser/file-fixture.ts
+@@ -13,5 +13,5 @@ const entry = (name: string, type = 'file', size = 12) => ({
+ 
+ // 只在测试浏览器内模拟 API/协议，不访问真实主机、不增加生产认证绕过。
+-export async function fileFixture(page: Page, options: { firstSeen?: boolean; credentialError?: boolean; noHosts?: boolean; holdUpload?: boolean; omitUploadMtime?: boolean; saveError?: boolean } = {}) {
++export async function fileFixture(page: Page, options: { firstSeen?: boolean; credentialError?: boolean; noHosts?: boolean; holdUpload?: boolean; omitUploadMtime?: boolean; saveError?: boolean; readError?: boolean } = {}) {
+   const hosts = options.noHosts ? [] : [host('alpha', 'Tokyo production', '192.0.2.10'), host('beta', 'Singapore backup', '192.0.2.20')];
+   const directories = new Map([
+@@ -100,4 +100,5 @@ export async function fileFixture(page: Page, options: { firstSeen?: boolean; cr
+           send({ type: 'sftp_read_text_start', requestId, path });
+           for (let offset = 0; offset < bytes.length; offset += 64 * 1024) ws.send(bytes.subarray(offset, offset + 64 * 1024));
++          if (options.readError) { send({ type: 'sftp_error', requestId, operation: 'read', message: 'Read interrupted' }); return; }
+           send({ type: 'sftp_read_text_result', requestId, path, size: bytes.length, mtime: file.mtime });
+         }
