@@ -149,7 +149,7 @@ export class SSHSession {
   private readonly channels = new Map<number, SSHChannel>([[0, this.shellChannel]]);
   private readonly forwards = new Map<number, ForwardChannel>();
   private readonly config: SSHConnectionConfig;
-  private readonly ws: WebSocket;
+  private ws: WebSocket;
   private readonly socket: Socket;
   private phase: Phase = 'version';
   private versionBuffer = new Uint8Array();
@@ -986,6 +986,39 @@ export class SSHSession {
     if (this.sftpAttachUrl) this.sendJson({ type: 'sftp_attach', url: this.sftpAttachUrl });
     if (this.processAttachUrl) this.sendJson({ type: 'process_attach', url: this.processAttachUrl });
     void this.openSystemProbeChannel().catch(() => undefined);
+    void this.flushInput();
+  }
+
+  /**
+   * Hand this uplink to another WebSocket: the same shell, seen by a client that
+   * came back. Everything already negotiated stays negotiated — after the switch
+   * the session simply writes to the new socket, which is the whole point of
+   * keeping it alive in the first place.
+   */
+  rebind(ws: WebSocket): void {
+    this.ws = ws;
+  }
+
+  /**
+   * Repeat the "you are connected" announcements for a reconnecting client: it
+   * never saw them, they were said to the socket it replaced. Deliberately does
+   * not reuse `markReady`, which would also re-open the system probe and start a
+   * second one alongside the still-running original.
+   */
+  async announceResume(cols?: number, rows?: number): Promise<void> {
+    if (this.phase !== 'ready') return;
+    this.sendJson({
+      type: 'ready',
+      negotiated: { kex: this.kexName, cipherC2S: this.cipherC2S, cipherS2C: this.cipherC2S, macC2S: this.macC2S, macS2C: this.macS2C },
+    });
+    this.status('shell_ready', 'Shell is ready');
+    if (this.sftpAttachUrl) this.sendJson({ type: 'sftp_attach', url: this.sftpAttachUrl });
+    if (this.processAttachUrl) this.sendJson({ type: 'process_attach', url: this.processAttachUrl });
+    // The new window rarely has the old one's dimensions; tell the pty before
+    // the first byte of output lands, or the shell reflows it wrongly.
+    if (typeof cols === 'number' && typeof rows === 'number') {
+      await this.resize(cols, rows).catch(() => undefined);
+    }
     void this.flushInput();
   }
 

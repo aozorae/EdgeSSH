@@ -43,6 +43,38 @@ async function sessionTicket(request: Request, env: Env, accountId: string): Pro
   return secureResponse(Response.json({ ...ticket, sessionId: id.toString() }, { headers: { 'Cache-Control': 'no-store' } }));
 }
 
+/**
+ * Swap the ticket of a session this account already owns. This is how a reloaded
+ * tab gets back to the shell it left behind: same Durable Object, same SSH
+ * connection, fresh credential. Only the owner can ask, and nothing else about
+ * the object changes — if the shell is gone, the reconnect simply fails.
+ */
+async function sessionTicketReissue(request: Request, env: Env, accountId: string): Promise<Response> {
+  const contentLength = Number(request.headers.get('Content-Length') ?? 0);
+  if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > 8192) return jsonError('Request body is too large', 413);
+  let body: Record<string, unknown>;
+  try {
+    const text = await request.text();
+    if (new TextEncoder().encode(text).length > 8192) return jsonError('Request body is too large', 413);
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return jsonError('Invalid JSON body', 400);
+    body = parsed as Record<string, unknown>;
+  } catch { return jsonError('Invalid JSON body', 400); }
+  if (Object.keys(body).length !== 1) return jsonError('Unsupported request field', 400);
+  const sessionId = body.sessionId;
+  if (typeof sessionId !== 'string' || !/^[0-9a-f]{64}$/i.test(sessionId)) return jsonError('Invalid session identifier', 400);
+  let id: DurableObjectId;
+  try { id = env.SSH_SESSIONS.idFromString(sessionId); } catch { return jsonError('Invalid session identifier', 400); }
+  const stub = env.SSH_SESSIONS.get(id);
+  const response = await stub.fetch(new Request('https://session.internal/ticket/reissue', {
+    method: 'POST',
+    headers: { 'x-client-ip': clientAddress(request), 'x-account-id': accountId },
+  }));
+  if (!response.ok) return jsonError(response.status === 403 ? 'Session owner mismatch' : 'Unable to renew this session', response.status === 403 ? 403 : 503);
+  const ticket = await response.json<{ ticket: string; expiresAt: number }>();
+  return secureResponse(Response.json({ ...ticket, sessionId: id.toString() }, { headers: { 'Cache-Control': 'no-store' } }));
+}
+
 async function sshUpgrade(request: Request, env: Env, accountId: string): Promise<Response> {
   if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return jsonError('WebSocket upgrade required', 426);
   const url = new URL(request.url);
@@ -167,6 +199,10 @@ export default {
       if (url.pathname === '/api/session') {
         if (request.method !== 'POST') return corsResponse(jsonError('Method not allowed', 405));
         return corsResponse(await sessionTicket(request, env, account!.id));
+      }
+      if (url.pathname === '/api/session/restore') {
+        if (request.method !== 'POST') return corsResponse(jsonError('Method not allowed', 405));
+        return corsResponse(await sessionTicketReissue(request, env, account!.id));
       }
       if (url.pathname === '/api/ssh') {
         if (request.method !== 'GET') return corsResponse(jsonError('Method not allowed', 405));

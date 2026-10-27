@@ -8,6 +8,7 @@ import { readKeychainKey } from '../accounts/keychain';
 import { APIError } from '../accounts/http';
 import { ForwardingState } from '../forwarding/state';
 import { FORWARD_RETENTION_MS, previewError } from '../forwarding/security';
+import { sessionRetentionMs, shouldRetainSession } from './session-retention';
 
 interface MainAttachment { role: 'main'; phase: 'waiting' | 'connecting' | 'connected' }
 interface SFTPAttachment { role: 'sftp'; phase: 'connected' }
@@ -27,10 +28,16 @@ interface SFTPAttachToken {
   session?: SSHSession;
 }
 type AuxiliaryAttachToken = SFTPAttachToken;
+/** Terminal dimensions are advisory — omitted values keep whatever the pty already has. */
+function positiveSize(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
 const TICKET_STORAGE_KEY = 'session-ticket';
 const SFTP_ATTACH_TOKEN_TTL_MS = 10 * 60 * 1000;
 const SFTP_ATTACH_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 interface RetainedForwarding { expiresAt: number; timeout: ReturnType<typeof setTimeout> }
+/** A shell whose browser tab went away, kept warm until it comes back or the window runs out. */
+interface RetainedSession { session: SSHSession; expiresAt: number; timeout: ReturnType<typeof setTimeout> }
 
 export class SSHSessionDO implements DurableObject {
   private readonly state: DurableObjectState;
@@ -50,6 +57,7 @@ export class SSHSessionDO implements DurableObject {
   private readonly processOwners = new Map<WebSocket, WebSocket>();
   private readonly processWebSocketsByMain = new Map<WebSocket, Set<WebSocket>>();
   private readonly retainedForwarding = new Map<WebSocket, RetainedForwarding>();
+  private readonly retainedSessions = new Map<WebSocket, RetainedSession>();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -82,23 +90,21 @@ export class SSHSessionDO implements DurableObject {
       }
     }
     if (url.pathname === '/ticket' && request.method === 'POST') {
-      const ip = request.headers.get('x-client-ip') ?? 'unknown';
-      if (!/^[0-9a-f:.]{2,64}$|^local$|^unknown$/i.test(ip)) return Response.json({ error: 'Invalid client address' }, { status: 400 });
-      const secret = crypto.getRandomValues(new Uint8Array(32));
-      const created = await createTicket(secret, ip);
-      const stored = await this.state.storage.transaction(async (tx) => {
-        if (await tx.get(TICKET_STORAGE_KEY)) return false;
-        await tx.put(TICKET_STORAGE_KEY, { secret: Array.from(secret), expiresAt: created.expiresAt, ip } satisfies StoredTicket);
-        await tx.put('account-id', accountId);
-        await tx.setAlarm(created.expiresAt);
-        return true;
-      });
-      secret.fill(0);
-      return stored ? Response.json(created) : Response.json({ error: 'Ticket already created' }, { status: 409 });
+      const ip = this.clientAddress(request);
+      if (!ip) return Response.json({ error: 'Invalid client address' }, { status: 400 });
+      return this.issueTicket(ip, accountId, true);
     }
     // 主通道和辅助通道均绑定签发票据的账户，持有别人的 URL 也不能附着会话。
     if (await this.state.storage.get('account-id') !== accountId) {
       return Response.json({ error: 'Session owner mismatch' }, { status: 403 });
+    }
+    if (url.pathname === '/ticket/reissue' && request.method === 'POST') {
+      const ip = this.clientAddress(request);
+      if (!ip) return Response.json({ error: 'Invalid client address' }, { status: 400 });
+      // Same session, fresh credential: the tab that owns this shell reloaded and
+      // is asking for its shell back. Reissuing invalidates the previous ticket,
+      // so two tabs can never claim the same session at once.
+      return this.issueTicket(ip, accountId, false);
     }
     if (url.pathname === '/forward-http') return this.forwarding.trusted(request);
     if (url.pathname === '/forward') {
@@ -205,6 +211,12 @@ export class SSHSessionDO implements DurableObject {
       if (typeof message !== 'string' || message.length > 160 * 1024) throw new Error('The first WebSocket message must be a connect JSON object');
       let decoded: unknown;
       try { decoded = JSON.parse(message); } catch { throw new Error('Invalid connect JSON'); }
+      // A tab that survived a reload asks for the shell it left behind instead of
+      // opening a new one.
+      if (this.isResumeFrame(decoded)) {
+        await this.takeRetainedSession(ws, decoded);
+        return;
+      }
       const config = parseConnectMessage(decoded);
       const pending: PendingConnection = { cancelled: false, closedSockets: new WeakSet() };
       this.pendingConnections.set(ws, pending);
@@ -262,10 +274,13 @@ export class SSHSessionDO implements DurableObject {
     }
   }
 
-  async webSocketClose(ws: WebSocket): Promise<void> {
+  async webSocketClose(ws: WebSocket, code: number): Promise<void> {
     if (this.isProcessWebSocket(ws)) this.cleanupProcessWebSocket(ws);
     else if (this.isSFTPWebSocket(ws)) this.cleanupSFTPWebSocket(ws);
-    else this.cleanup(ws);
+    // The code is how the client says goodbye: 1000 means "disconnect me", while
+    // going away, an abrupt close or no code at all mean the tab vanished and may
+    // come back looking for this shell.
+    else this.cleanup(ws, false, code);
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
@@ -290,6 +305,35 @@ export class SSHSessionDO implements DurableObject {
     } catch {
       return false;
     }
+  }
+
+  private clientAddress(request: Request): string | null {
+    const ip = request.headers.get('x-client-ip') ?? 'unknown';
+    return /^[0-9a-f:.]{2,64}$|^local$|^unknown$/i.test(ip) ? ip : null;
+  }
+
+  /**
+   * Mint the one-off credential that lets a WebSocket claim this object. Unless
+   * the caller is explicitly reissuing, an existing ticket is left untouched —
+   * one live ticket at a time is what keeps this object to a single main socket.
+   */
+  private async issueTicket(ip: string, accountId: string, onlyIfAbsent: boolean): Promise<Response> {
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    const created = await createTicket(secret, ip);
+    const stored = await this.state.storage.transaction(async (tx) => {
+      if (onlyIfAbsent && await tx.get(TICKET_STORAGE_KEY)) return false;
+      await tx.put(TICKET_STORAGE_KEY, { secret: Array.from(secret), expiresAt: created.expiresAt, ip } satisfies StoredTicket);
+      await tx.put('account-id', accountId);
+      await tx.setAlarm(created.expiresAt);
+      return true;
+    });
+    secret.fill(0);
+    return stored ? Response.json(created) : Response.json({ error: 'Ticket already created' }, { status: 409 });
+  }
+
+  /** How long a shell is held after its tab disappeared (`SESSION_RETENTION_MS`). */
+  private sessionRetention(): number {
+    return sessionRetentionMs(this.env.SESSION_RETENTION_MS);
   }
 
   private connectTimeout(): number {
@@ -483,6 +527,50 @@ export class SSHSessionDO implements DurableObject {
     throw lastError;
   }
 
+  /**
+   * Hand the retained shell to the client that came back for it. Nothing is
+   * reconnected or re-authenticated: the same process simply writes to a new
+   * socket, and the side channels are re-pointed at the credentials that came
+   * with this handshake.
+   */
+  private async takeRetainedSession(ws: WebSocket, frame: { cols?: unknown; rows?: unknown }): Promise<void> {
+    const entry = [...this.retainedSessions.entries()][0];
+    if (!entry) {
+      this.reject(ws, 'This session has already ended; connect again to open a new one.', false);
+      return;
+    }
+    const [previous, retained] = entry;
+    clearTimeout(retained.timeout);
+    this.retainedSessions.delete(previous);
+    this.sessions.delete(previous);
+    // Nothing bound to the socket that left survives it: its SFTP and process
+    // sockets went away with that tab.
+    const previousToken = this.sftpTokenByMainWebSocket.get(previous);
+    if (previousToken) this.deleteSFTPAttachToken(previousToken);
+    const previousProcessToken = this.processTokenByMainWebSocket.get(previous);
+    if (previousProcessToken) this.deleteProcessAttachToken(previousProcessToken);
+    retained.session.rebind(ws);
+    this.sessions.set(ws, retained.session);
+    ws.serializeAttachment({ role: 'main', phase: 'connected' } satisfies MainAttachment);
+    const token = this.sftpTokenByMainWebSocket.get(ws);
+    const sftpAttach = token ? this.sftpAttachTokens.get(token) : undefined;
+    if (sftpAttach) {
+      sftpAttach.session = retained.session;
+      retained.session.setSFTPAttachUrl(sftpAttach.attachUrl);
+    }
+    const processToken = this.processTokenByMainWebSocket.get(ws);
+    const processAttach = processToken ? this.processAttachTokens.get(processToken) : undefined;
+    if (processAttach) {
+      processAttach.session = retained.session;
+      retained.session.setProcessAttachUrl(processAttach.attachUrl);
+    }
+    await retained.session.announceResume(positiveSize(frame.cols), positiveSize(frame.rows));
+  }
+
+  private isResumeFrame(decoded: unknown): decoded is { cols?: unknown; rows?: unknown } {
+    return !!decoded && typeof decoded === 'object' && (decoded as { type?: unknown }).type === 'resume';
+  }
+
   private reject(ws: WebSocket, message: string, retryable = true): void {
     try { ws.send(JSON.stringify({ type: 'error', event: 'connection_failed', message, ...(retryable ? {} : { retryable: false }) })); } catch { /* already closed */ }
     this.cleanup(ws);
@@ -495,7 +583,7 @@ export class SSHSessionDO implements DurableObject {
     this.deadlines.delete(ws);
   }
 
-  private cleanup(ws: WebSocket, force = false): void {
+  private cleanup(ws: WebSocket, force = false, closeCode?: number): void {
     const session = this.sessions.get(ws);
     if (!force && session && this.forwarding.owns(session)) {
       if (!this.retainedForwarding.has(ws)) {
@@ -506,6 +594,21 @@ export class SSHSessionDO implements DurableObject {
       }
       return;
     }
+    if (!force && session && shouldRetainSession(closeCode)) {
+      if (!this.retainedSessions.has(ws)) {
+        // A reload, a navigation or a dropped network — none of them asked to
+        // disconnect. Hold the shell so the tab that comes back inherits the very
+        // same process instead of re-authenticating into a new one.
+        const ttl = this.sessionRetention();
+        const expiresAt = Date.now() + ttl;
+        const timeout = setTimeout(() => this.cleanup(ws, true), ttl);
+        this.retainedSessions.set(ws, { session, expiresAt, timeout });
+      }
+      return;
+    }
+    const restored = this.retainedSessions.get(ws);
+    if (restored) clearTimeout(restored.timeout);
+    this.retainedSessions.delete(ws);
     const retained = this.retainedForwarding.get(ws);
     if (retained) clearTimeout(retained.timeout);
     this.retainedForwarding.delete(ws);

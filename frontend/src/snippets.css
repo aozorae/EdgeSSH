@@ -46,18 +46,63 @@ body[data-view='snippets'] { overflow-y: auto; background: var(--home-bg); }
 .snippet-empty .snippet-symbol { display: block; font-size: 32px; margin-bottom: 24px; }
 .snippet-empty strong { display: block; color: var(--snip-text); }
 .snippet-empty p { font-size: 13px; line-height: 1.6; }
-/* 浮窗依附完整工作台而非 xterm 区域，避免手机横屏时被展开的命令编辑器挤到不可操作。 */
-.terminal-card:has(> .snippet-panel) { position: relative; }
-.snippet-panel { position: absolute; z-index: 5; right: 12px; top: 54px; width: 320px; max-width: calc(100% - 16px); max-height: min(480px, calc(100% - 68px)); border: 1px solid var(--snip-border); border-radius: 12px; box-shadow: var(--shadow); display: flex; flex-direction: column; overflow: hidden; }
-.snippet-panel.is-collapsed { width: 186px; }
-.snippet-panel-heading { display: flex; flex-shrink: 0; align-items: center; padding: 6px; border-bottom: 1px solid var(--snip-border); }
-.is-collapsed .snippet-panel-heading { border-bottom: 0; }
-.is-collapsed .snippet-manage { display: none; }
-.snippet-panel button.snippet-drag { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; border: 0; background: transparent; cursor: grab; touch-action: none; user-select: none; text-align: left; }
-.snippet-panel button.snippet-drag:active { cursor: grabbing; }
-.snippet-drag strong { white-space: nowrap; font-size: 13px; }
-.snippet-grip { color: var(--snip-muted); margin-left: auto; }
-.snippet-panel :is(button.snippet-collapse, button.snippet-manage) { width: 36px; padding: 0; border: 0; background: transparent; font-size: 20px; flex-shrink: 0; }
+/* 入口在顶栏那一排，面板作为下拉贴着该行展开：不再压住终端输出。 */
+.snippet-menu {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.snippet-menu > #snippet-toggle {
+  white-space: nowrap;
+}
+
+.snippet-panel {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 320px;
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: min(520px, calc(100vh - 70px));
+  border: 1px solid var(--snip-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.snippet-panel-heading {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border-bottom: 1px solid var(--snip-border);
+}
+
+.snippet-panel-heading > strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.snippet-panel-heading > .snippet-symbol {
+  font-size: 16px;
+}
+
+.snippet-panel .snippet-manage {
+  width: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 20px;
+  flex-shrink: 0;
+}
 #snippet-panel-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 12px 12px; scrollbar-width: thin; }
 .snippet-panel-hint { color: var(--snip-muted); font-size: 11px; margin: 12px 0; }
 .compact .snippet-search { flex-basis: 100%; }
@@ -88,7 +133,7 @@ body[data-view='snippets'] { overflow-y: auto; background: var(--home-bg); }
   .snippet-page-heading > .snippet-symbol { width: 48px; height: 48px; font-size: 22px; }
   .snippet-page-heading h1 { font-size: 24px; }
   .snippet-surface button { min-height: 44px; }
-  .snippet-panel :is(button.snippet-collapse, button.snippet-manage) { width: 44px; }
+  .snippet-panel .snippet-manage { width: 44px; }
   .snippet-surface :is(input, textarea), .snippet-surface .snippet-search input { font-size: 16px; }
   .snippet-dialog { padding: 20px; }
 }

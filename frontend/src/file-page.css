@@ -26,6 +26,9 @@ body[data-view='files'] { height: auto; min-height: 100%; overflow-y: auto; back
 .files-connection { display: flex; align-items: center; gap: 16px; padding: 18px 20px; border: 1px solid var(--home-line); border-radius: 10px; background: var(--home-surface); }
 .files-host-icon { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 9px; background: var(--home-accent-soft); color: var(--home-accent-hover); flex-shrink: 0; }
 .files-host-field { display: flex; flex-direction: column; gap: 6px; flex: 1; max-width: 510px; min-width: 0; color: var(--home-muted); font-size: 12px; }
+/* 会话选择器：窄一点，别跟目标主机下拉抢宽度。 */
+.files-session-field { flex: 0 1 250px; max-width: 250px; }
+.files-session-field[hidden] { display: none; }
 #dashboard .files-host-field select { width: 100%; min-width: 0; height: 42px; padding: 0 32px 0 12px; color: var(--home-ink); background: var(--home-bg); border: 1px solid var(--home-line); border-radius: 6px; font: 13px var(--home-mono); }
 #files-connect { margin-top: 24px; min-width: 104px; }
 .files-connection-meta { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; font-size: 12px; color: var(--home-muted); text-align: right; }
@@ -78,6 +81,7 @@ body[data-view='files'] .home-account { margin-left: auto; }
 @media (max-width: 1100px) {
   .files-page { padding: 24px; }
   .files-connection { flex-wrap: wrap; }
+  .files-session-field { flex: 0 1 260px; max-width: 260px; }
   .files-connection-meta { flex-basis: 100%; flex-direction: row; align-items: center; justify-content: space-between; }
   .files-page .file-manager { grid-template-columns: 180px minmax(0, 1fr); }
   .files-page .file-table :is(th, td):nth-child(n+5) { display: none; }
@@ -91,6 +95,8 @@ body[data-view='files'] .home-account { margin-left: auto; }
   .files-connection { padding: 14px; gap: 12px; }
   .files-host-icon { display: none; }
   .files-host-field { flex-basis: calc(100% - 116px); }
+  /* 会话选择器自己占一行，不要和目标主机下拉并排挤成一团。 */
+  .files-session-field { flex-basis: 100%; max-width: none; }
   #dashboard .files-host-field select { height: 44px; font-size: 16px; }
   #files-connect { min-height: 44px; }
   .files-connection-meta { align-items: flex-start; text-align: left; font-size: 11px; }

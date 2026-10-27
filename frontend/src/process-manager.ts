@@ -209,6 +209,10 @@ export class ProcessManager {
   private readonly onReconnect: ((zh: string, en: string) => void) | undefined;
   private readonly onToast: ((zh: string, en: string, kind: 'info' | 'error') => void) | undefined;
   private readonly onNetworkSample: ((samples: NetworkSample[] | null, timestamp: number) => void) | undefined;
+  /** Recreated by every `mount()` so `unmount()` drops every panel listener at once. */
+  private bindings = new AbortController();
+  /** True while this manager owns the shared process panel DOM — see `mount()`. */
+  private mounted = false;
   private socket: WebSocket | null = null;
   private generation = 0;
   private snapshot: ProcessSnapshot | null = null;
@@ -235,6 +239,38 @@ export class ProcessManager {
     this.onReconnect = options.onReconnect;
     this.onToast = options.onToast;
     this.onNetworkSample = options.onNetworkSample;
+    // No DOM work at construction: a background session owns no DOM. The owner
+    // calls `mount()` when this manager's session comes to the front.
+  }
+
+  /**
+   * Take ownership of the shared process panel DOM. Only one manager may be
+   * mounted: the background ones keep polling their own process WebSocket.
+   */
+  mount(): void {
+    if (this.mounted) return;
+    this.bindings = new AbortController();
+    this.bindControls();
+    this.bindKillDialog();
+    this.mounted = true;
+    this.render();
+  }
+
+  /**
+   * Release the panel without tearing the session down: keep polling in the
+   * background so returning to the tab shows live data immediately.
+   */
+  unmount(): void {
+    if (!this.mounted) return;
+    this.mounted = false;
+    this.bindings.abort();
+    for (const frame of this.progressAnimations.values()) cancelAnimationFrame(frame);
+    this.progressAnimations.clear();
+    if (this.elements.killDialog.open) this.elements.killDialog.close('reject');
+  }
+
+  private bindControls(): void {
+    const signal = this.bindings.signal;
     this.elements.panel.addEventListener('click', (event) => {
       const target = event.target as HTMLElement;
       const sortButton = target.closest<HTMLButtonElement>('[data-process-sort]');
@@ -260,7 +296,7 @@ export class ProcessManager {
         void this.copyProcessValue(value, copyCell.dataset.processCopyKind as 'pid' | 'command' | undefined);
         return;
       }
-    });
+    }, { signal });
     // Copyable PID/command cells are keyboard-focusable (tabIndex=0); mirror the click-to-copy
     // behavior for Enter/Space so the interaction is operable without a mouse.
     this.elements.panel.addEventListener('keydown', (event) => {
@@ -273,9 +309,7 @@ export class ProcessManager {
       if (!value) return;
       event.preventDefault();
       void this.copyProcessValue(value, copyCell.dataset.processCopyKind as 'pid' | 'command' | undefined);
-    });
-    this.bindKillDialog();
-    this.render();
+    }, { signal });
   }
 
   attach(url: string): void {
@@ -336,14 +370,16 @@ export class ProcessManager {
       this.pendingKillsByPid.delete(this.pendingKills.get(requestId)!.pid);
     }
     this.pendingKills.clear();
-    if (this.elements.killDialog.open) this.elements.killDialog.close('reject');
-    this.elements.killDialogResult.hidden = true;
-    this.elements.killDialogResult.removeAttribute('data-state');
-    this.elements.killDialogResult.textContent = '';
-    this.elements.killDialog.removeAttribute('data-state');
-    this.elements.killDialog.removeAttribute('data-request-id');
-    this.elements.killDialog.removeAttribute('data-pid');
-    this.elements.killDialog.removeAttribute('data-command');
+    if (this.mounted) {
+      if (this.elements.killDialog.open) this.elements.killDialog.close('reject');
+      this.elements.killDialogResult.hidden = true;
+      this.elements.killDialogResult.removeAttribute('data-state');
+      this.elements.killDialogResult.textContent = '';
+      this.elements.killDialog.removeAttribute('data-state');
+      this.elements.killDialog.removeAttribute('data-request-id');
+      this.elements.killDialog.removeAttribute('data-pid');
+      this.elements.killDialog.removeAttribute('data-command');
+    }
     this.render();
   }
 
@@ -456,6 +492,7 @@ export class ProcessManager {
 
   private bindKillDialog(): void {
     const dialog = this.elements.killDialog;
+    const signal = this.bindings.signal;
     // Native <dialog method="dialog"> form submissions will close the dialog. We intercept the
     // confirm button so we can flip it into a pending state, fire the WebSocket message, and
     // keep the dialog open until the server responds.
@@ -509,7 +546,7 @@ export class ProcessManager {
         dialog.close('reject');
         this.render();
       }
-    });
+    }, { signal });
     dialog.addEventListener('close', () => {
       const dataset = dialog.dataset;
       const pendingRequestId = dataset.state === 'pending' ? dataset.requestId ?? '' : '';
@@ -528,7 +565,7 @@ export class ProcessManager {
         // The result handler will fall back to a toast because the dialog is no longer open.
       }
       this.render();
-    });
+    }, { signal });
   }
 
   private openKillDialog(pid: number, command: string): void {
@@ -627,6 +664,9 @@ export class ProcessManager {
   }
 
   private bilingualToast(zh: string, en: string, kind: 'info' | 'error' = 'info'): void {
+    // Toasts surface in page-level UI; only the mounted session may raise them.
+    // Step 7 will prefix background toasts with the session label.
+    if (!this.mounted) return;
     if (this.onToast) {
       this.onToast(zh, en, kind);
       return;
@@ -670,6 +710,7 @@ export class ProcessManager {
   }
 
   private render(): void {
+    if (!this.mounted) return;
     const snapshot = this.snapshot;
     if (!snapshot) {
       this.elements.tableBody.replaceChildren();
@@ -819,11 +860,15 @@ export class ProcessManager {
   }
 
   private setStatus(zh: string, en: string): void {
+    if (!this.mounted) return;
     this.elements.status.textContent = this.getLanguage() === 'zh-CN' ? zh : en;
   }
 
   private showError(zh: string, en: string): void {
     const message = this.getLanguage() === 'zh-CN' ? zh : en;
+    // A background session records the failure in its own state but must not
+    // repaint the shared panel with its error row.
+    if (!this.mounted) return;
     this.elements.error.textContent = message;
     this.elements.error.hidden = false;
     this.elements.empty.hidden = true;
@@ -901,35 +946,36 @@ export class ProcessManager {
   }
 }
 
-function getElement<T extends HTMLElement>(id: string): T {
-  const element = document.getElementById(id);
+function getElement<T extends HTMLElement>(root: ParentNode, id: string): T {
+  const element = root.querySelector<HTMLElement>(`#${id}`);
   if (!element) throw new Error(`Missing process manager element #${id}`);
   return element as T;
 }
 
-export function collectProcessManagerElements(): ProcessManagerElements {
+/** `root` lets a caller collect a scoped copy instead of the whole document. */
+export function collectProcessManagerElements(root: ParentNode = document): ProcessManagerElements {
   return {
-    panel: getElement('process-manager-panel'),
-    tableBody: getElement<HTMLTableSectionElement>('process-table-body'),
-    status: getElement('process-manager-status'),
-    empty: getElement('process-manager-empty'),
-    error: getElement('process-manager-error'),
-    updated: getElement('process-updated'),
-    cpuValue: getElement('resource-cpu-value'),
-    cpuProgress: getElement<HTMLProgressElement>('resource-cpu-progress'),
-    cpuLoad: getElement('resource-cpu-load'),
-    memoryValue: getElement('resource-memory-value'),
-    memoryAmount: getElement('resource-memory-amount'),
-    memoryProgress: getElement<HTMLProgressElement>('resource-memory-progress'),
-    swapValue: getElement('resource-swap-value'),
-    swapAmount: getElement('resource-swap-amount'),
-    swapProgress: getElement<HTMLProgressElement>('resource-swap-progress'),
-    killDialog: getElement<HTMLDialogElement>('process-kill-dialog'),
-    killDialogPid: getElement('process-kill-target-pid'),
-    killDialogCommand: getElement('process-kill-target-command'),
-    killDialogResult: getElement('process-kill-result'),
-    killConfirmButton: getElement<HTMLButtonElement>('confirm-process-kill'),
-    killRejectButton: getElement<HTMLButtonElement>('reject-process-kill'),
-    toastRegion: getElement('toast-region'),
+    panel: getElement(root, 'process-manager-panel'),
+    tableBody: getElement<HTMLTableSectionElement>(root, 'process-table-body'),
+    status: getElement(root, 'process-manager-status'),
+    empty: getElement(root, 'process-manager-empty'),
+    error: getElement(root, 'process-manager-error'),
+    updated: getElement(root, 'process-updated'),
+    cpuValue: getElement(root, 'resource-cpu-value'),
+    cpuProgress: getElement<HTMLProgressElement>(root, 'resource-cpu-progress'),
+    cpuLoad: getElement(root, 'resource-cpu-load'),
+    memoryValue: getElement(root, 'resource-memory-value'),
+    memoryAmount: getElement(root, 'resource-memory-amount'),
+    memoryProgress: getElement<HTMLProgressElement>(root, 'resource-memory-progress'),
+    swapValue: getElement(root, 'resource-swap-value'),
+    swapAmount: getElement(root, 'resource-swap-amount'),
+    swapProgress: getElement<HTMLProgressElement>(root, 'resource-swap-progress'),
+    killDialog: getElement<HTMLDialogElement>(root, 'process-kill-dialog'),
+    killDialogPid: getElement(root, 'process-kill-target-pid'),
+    killDialogCommand: getElement(root, 'process-kill-target-command'),
+    killDialogResult: getElement(root, 'process-kill-result'),
+    killConfirmButton: getElement<HTMLButtonElement>(root, 'confirm-process-kill'),
+    killRejectButton: getElement<HTMLButtonElement>(root, 'reject-process-kill'),
+    toastRegion: getElement(root, 'toast-region'),
   };
 }

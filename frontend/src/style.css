@@ -1056,6 +1056,20 @@ button:disabled {
   font-size: 12px;
 }
 
+/* 国旗沿用左侧主机列表的那一套；没有已知位置时整块让位给文字。 */
+.session-flag {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  overflow: visible;
+}
+
+.session-flag .country-flag {
+  width: 22px;
+  height: 16px;
+  border-radius: 2px;
+}
+
 .session-target span {
   color: var(--term-muted-2);
   font-family: var(--mono);
@@ -1318,7 +1332,7 @@ button:disabled {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: 42px minmax(0, 1fr) auto;
+  grid-template-rows: 42px auto minmax(0, 1fr) auto;
   overflow: hidden;
 }
 
@@ -1371,6 +1385,146 @@ button:disabled {
   font-size: 8px;
 }
 
+.session-tabs {
+  /* The strip decides which session is in front, so it outranks floating panels
+     (snippet window, z-index 5) that would otherwise swallow its taps on narrow
+     screens where the panel and the tabs fight for the same top-right space. */
+  position: relative;
+  z-index: 6;
+  display: flex;
+  min-width: 0;
+  gap: 3px;
+  align-items: flex-end;
+  padding: 5px 8px 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  border-bottom: 1px solid var(--term-border);
+  background: var(--term-chrome);
+  color: var(--term-muted);
+  font-family: var(--mono);
+}
+
+.session-tabs[hidden] {
+  display: none;
+}
+
+.session-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.session-tabs::-webkit-scrollbar-thumb {
+  border-radius: 2px;
+  background: var(--term-scrollbar);
+}
+
+.session-tab {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 208px;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 5px 5px 8px;
+  border: 1px solid var(--term-border);
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  background: var(--term-chrome);
+  color: var(--term-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.3;
+  user-select: none;
+}
+
+.session-tab:hover {
+  background: var(--term-hover);
+  color: var(--term-control-text);
+}
+
+.session-tab:focus-visible {
+  outline: 2px solid var(--term-focus);
+  outline-offset: -2px;
+}
+
+.session-tab[aria-selected='true'] {
+  border-color: var(--term-accent);
+  border-bottom: 1px solid var(--terminal);
+  margin-bottom: -1px;
+  background: var(--terminal);
+  color: var(--term-accent-text);
+}
+
+.session-tab-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted-2);
+}
+
+.session-tab-dot.connecting,
+.session-tab-dot.disconnecting {
+  background: var(--warning);
+  animation: session-tab-pulse 1.1s ease-in-out infinite;
+}
+
+.session-tab-dot.connected {
+  background: var(--accent);
+}
+
+.session-tab-dot.error {
+  background: var(--danger);
+}
+
+@keyframes session-tab-pulse {
+  50% {
+    opacity: 0.28;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-tab-dot.connecting,
+  .session-tab-dot.disconnecting {
+    animation: none;
+  }
+}
+
+.session-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-tab-close {
+  display: grid;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  place-items: center;
+  opacity: 0.55;
+}
+
+.session-tab-close:hover {
+  background: var(--danger-dim);
+  color: var(--danger);
+  opacity: 1;
+}
+
+.session-tab-close:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--term-focus);
+  outline-offset: -1px;
+}
+
 .terminal-stage {
   position: relative;
   min-width: 0;
@@ -1382,9 +1536,13 @@ button:disabled {
     var(--terminal);
 }
 
-#terminal {
+.term-instance {
   width: 100%;
   height: 100%;
+}
+
+.term-instance[hidden] {
+  display: none;
 }
 
 /* xterm ships `.xterm .xterm-viewport { background-color: #000 }`. The viewport
@@ -2551,6 +2709,19 @@ button:disabled {
   color: #ff7b82;
 }
 
+/* 多会话时事件来源会有歧义，给消息本体加一枚会话标签（不放 grid 列里，免得改布局）。 */
+.event-session {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .08);
+  color: #9fb4c2;
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: 1px;
+}
+
 .terminal-card:fullscreen {
   width: 100vw;
   height: 100vh;
@@ -3013,6 +3184,11 @@ button:disabled {
     gap: 6px;
   }
 
+  /* 这一档留给标题的空间只够 user@host，国旗让位。 */
+  .session-flag {
+    display: none;
+  }
+
   .resource-metrics {
     flex: 0 1 180px;
     gap: 4px;
@@ -3224,7 +3400,7 @@ button:disabled {
 
 @media (max-width: 200px) {
   .terminal-pane {
-    grid-template-rows: 70px minmax(0, 1fr);
+    grid-template-rows: 70px auto minmax(0, 1fr);
   }
 
   .terminal-toolbar {

@@ -1,14 +1,22 @@
 import type { CloudHost } from './cloud-api';
 import type { FileManager } from './file-manager';
 import type { ArboristFileList } from './file-list';
+import type { SessionSummary } from './session-manager';
 import './file-page.css';
 
 export type FileConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnecting' | 'error';
+
+/** States worth offering in the picker — an idle shell has no files to show. */
+const LIVE_STATES: ReadonlySet<string> = new Set(['connecting', 'connected', 'disconnecting']);
 
 interface FilePageActions {
   connect(host: CloudHost): Promise<void>;
   disconnect(): void;
   openTerminal(): void;
+  /** Same read-only session snapshot the dashboard works with. */
+  sessions(): SessionSummary[];
+  activeSessionId(): string | null;
+  activateSession(id: string): void;
 }
 
 const folderIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 9h18"/></svg>';
@@ -25,8 +33,15 @@ export class FilePage {
   private mounted = false;
   private list: ArboristFileList | null = null;
   private activeTarget: { id?: string; label: string } | null = null;
+  /**
+   * The file panel is shared DOM, so its manager travels with the front session
+   * instead of being captured once at construction.
+   */
+  private manager?: FileManager;
+  private readonly sessionField: HTMLElement;
+  private readonly sessionSelect: HTMLSelectElement;
 
-  constructor(private readonly panel: HTMLElement, private readonly actions: FilePageActions, private readonly manager: FileManager) {
+  constructor(private readonly panel: HTMLElement, private readonly actions: FilePageActions) {
     panel.before(this.dockMarker);
     this.root.className = 'files-page';
     this.root.hidden = true;
@@ -44,6 +59,8 @@ export class FilePage {
         <button id="files-connect" class="home-button primary" type="button" disabled>连接主机</button>
         <div class="files-connection-meta"><span id="files-connection-state" class="files-state" data-state="idle" role="status">未连接</span>
           <span id="files-host-hint">使用已保存的 SSH 凭据安全连接</span></div>
+        <label class="files-host-field files-session-field" id="files-session-field" hidden for="files-session"><span>作用会话</span>
+          <select id="files-session" aria-label="作用会话"></select></label>
       </section>
       <p id="files-notice" class="files-notice" role="status" hidden></p>
       <section class="files-browser" aria-label="远程文件">
@@ -54,7 +71,13 @@ export class FilePage {
         <span>单文件 ≤ 64 MiB · 仅支持删除空目录</span></footer>`;
     this.select = this.get<HTMLSelectElement>('#files-host');
     this.connectButton = this.get<HTMLButtonElement>('#files-connect');
+    this.sessionField = this.get('#files-session-field');
+    this.sessionSelect = this.get<HTMLSelectElement>('#files-session');
     this.select.addEventListener('change', () => this.renderConnection());
+    this.sessionSelect.addEventListener('change', () => {
+      const id = this.sessionSelect.value;
+      if (id) this.actions.activateSession(id);
+    });
     this.connectButton.addEventListener('click', () => void this.toggleConnection());
     this.get('#files-terminal').addEventListener('click', () => this.actions.openTerminal());
   }
@@ -66,6 +89,7 @@ export class FilePage {
   show(): void {
     this.mounted = true;
     this.root.hidden = false;
+    this.refreshSessions();
     this.get('.files-panel-slot').append(this.panel);
     this.panel.hidden = false;
     this.panel.setAttribute('role', 'region');
@@ -83,13 +107,13 @@ export class FilePage {
       host.className = 'files-list';
       this.panel.querySelector('.file-table-wrap')!.prepend(host);
       this.list = new ArboristFileList(host, {
-        select: (index) => this.manager.selectEntry(index),
-        activate: (index) => this.manager.activateIndex(index),
+        select: (index) => this.manager?.selectEntry(index),
+        activate: (index) => this.manager?.activateIndex(index),
       });
       this.panel.querySelector<HTMLTableElement>('.file-table')!.hidden = true;
-      this.manager.setListView(this.list);
+      this.manager?.setListView(this.list);
     } catch {
-      this.manager.setListView(null);
+      this.manager?.setListView(null);
       this.list?.destroy();
       this.list = null;
       this.panel.querySelector<HTMLTableElement>('.file-table')!.hidden = false;
@@ -103,12 +127,48 @@ export class FilePage {
     this.list?.destroy();
     this.list = null;
     this.panel.querySelector<HTMLTableElement>('.file-table')!.hidden = false;
-    this.manager.setListView(null);
+    this.manager?.setListView(null);
     this.root.hidden = true;
     this.dockMarker.after(this.panel);
     this.panel.setAttribute('role', 'tabpanel');
     this.panel.setAttribute('aria-labelledby', 'file-manager-tab');
     this.panel.hidden = document.getElementById('file-manager-tab')!.getAttribute('aria-selected') !== 'true';
+  }
+
+  /**
+   * Called whenever the front session changes: the panel's manager is per
+   * session, so the page must follow whoever owns the shared DOM now.
+   */
+  setManager(manager: FileManager | undefined): void {
+    if (this.manager === manager) return;
+    this.manager?.setListView(null);
+    this.manager = manager;
+    // The list itself is loaded once; a new owner just gets it back.
+    manager?.setListView(this.list);
+  }
+
+  /** Session picker: which of the live sessions the file panel acts on. */
+  refreshSessions(): void {
+    const live = this.actions.sessions().filter((session) => LIVE_STATES.has(session.state));
+    this.sessionField.hidden = live.length === 0;
+    if (!live.length) { this.sessionSelect.replaceChildren(); return; }
+    const serials = new Map<string, number>();
+    const options = live.map((session) => {
+      const serial = (serials.get(session.targetKey) ?? 0) + 1;
+      serials.set(session.targetKey, serial);
+      return new Option(this.describe(session, serial), session.id);
+    });
+    this.sessionSelect.replaceChildren(...options);
+    const activeId = this.actions.activeSessionId();
+    const target = live.find((session) => session.id === activeId) ?? live[0];
+    this.sessionSelect.value = target.id;
+    this.sessionSelect.disabled = live.length < 2;
+  }
+
+  private describe(session: SessionSummary, serial: number): string {
+    const label = session.label || session.targetKey;
+    // Same host twice ("root@10.0.0.1:22") needs something to tell them apart.
+    return serial > 1 ? `${label} #${serial}` : label;
   }
 
   setHosts(hosts: CloudHost[]): void {

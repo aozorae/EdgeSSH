@@ -65,6 +65,8 @@ export interface Env {
   SSH_SESSIONS: DurableObjectNamespace;
   ASSETS?: Fetcher;
   CONNECT_TIMEOUT_MS?: string;
+  /** How long a shell is held after its browser tab disappeared, in milliseconds. */
+  SESSION_RETENTION_MS?: string;
 }
 
 export const SSH_MSG_DISCONNECT = 1;

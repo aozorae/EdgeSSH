@@ -22,3 +22,6 @@ scripts-tmp/
 .wrangler.preview.generated.toml
 test-results/
 playwright-report/
+pw-out/
+# 本地记忆导出：仅为本机/跨项目搬运用，不入库。
+EDGESSH-MEMORY.md

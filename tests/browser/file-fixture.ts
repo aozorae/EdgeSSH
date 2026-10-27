@@ -23,6 +23,8 @@ export async function fileFixture(page: Page, options: { firstSeen?: boolean; cr
   const calls: Array<Record<string, any>> = [];
   const sshSockets: WebSocketRoute[] = [];
   const sftpSockets: WebSocketRoute[] = [];
+  /** Every SFTP channel keeps its own log, so tests can tell whose channel served a request. */
+  const sftpCalls: Array<Array<Record<string, any>>> = [];
   const uploaded: Buffer[] = [];
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -58,6 +60,8 @@ export async function fileFixture(page: Page, options: { firstSeen?: boolean; cr
   });
   await page.routeWebSocket('**/api/sftp?*', (ws) => {
     sftpSockets.push(ws);
+    const mine: Array<Record<string, any>> = [];
+    sftpCalls.push(mine);
     let upload: { requestId: string; path: string; size: number } | undefined;
     const send = (data: object) => ws.send(JSON.stringify(data));
     const parent = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
@@ -70,6 +74,7 @@ export async function fileFixture(page: Page, options: { firstSeen?: boolean; cr
       }
       const message = JSON.parse(raw);
       calls.push(message);
+      mine.push(message);
       const { type, requestId, path } = message;
       if (type === 'sftp_init') send({ type: 'sftp_ready', cwd: '/root', version: 3 });
       if (type === 'sftp_list') {
@@ -105,7 +110,7 @@ export async function fileFixture(page: Page, options: { firstSeen?: boolean; cr
   });
   await page.goto('/');
   await page.locator('#rail-files').click();
-  return { hosts, calls, sshSockets, sftpSockets, uploaded, directories };
+  return { hosts, calls, sshSockets, sftpSockets, sftpCalls, uploaded, directories };
 }
 
 export async function connectFiles(page: Page, id = 'alpha') {

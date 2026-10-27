@@ -127,7 +127,16 @@ export class FileTree {
   private readonly getLanguage: () => string;
   private readonly onNavigate: (path: string) => void;
   private readonly onError?: (message: string) => void;
-  private readonly bindings = new AbortController();
+  /** Recreated by every `mount()` so `unmount()` drops every listener at once. */
+  private bindings = new AbortController();
+  /** True while this tree owns the shared `#file-tree` DOM — see `mount()`. */
+  private mounted = false;
+  /**
+   * While backgrounded the tree keeps rendering into this detached container,
+   * so it can preserve and advance its own node rows without ever touching the
+   * panel another session is looking at.
+   */
+  private detached = document.createElement('div');
 
   private readonly scroller: HTMLElement;
   private readonly collapseButton: HTMLButtonElement;
@@ -183,19 +192,40 @@ export class FileTree {
     this.scroller = scroller;
     this.collapseButton = collapseBtn;
     this.resizeHandle = resize;
+    // No DOM writes and no listeners here: a background session owns none of
+    // the shared panel. `mount()` is what brings this tree to the front.
+  }
 
+  /** Where the tree renders right now: the real scroller, or its own detached box. */
+  private get renderTarget(): HTMLElement {
+    return this.mounted ? this.scroller : this.detached;
+  }
+
+  /**
+   * Publish this tree into the shared `#file-tree` panel, moving the rows it
+   * accumulated while backgrounded into place.
+   */
+  mount(): void {
+    if (this.mounted) return;
+    this.bindings = new AbortController();
+    const signal = this.bindings.signal;
     this.container.setAttribute('role', 'tree');
-
-    // Load persisted state
     this.loadWidth();
     this.loadCollapsed();
-
-    // Bind events
-    const signal = this.bindings.signal;
     this.scroller.addEventListener('keydown', (event) => this.handleKeydown(event), { signal });
     this.scroller.addEventListener('click', (event) => this.handleClick(event), { signal });
     this.collapseButton.addEventListener('click', () => this.toggleCollapsed(), { signal });
     this.initResize(signal);
+    this.mounted = true;
+    this.scroller.replaceChildren(...this.detached.childNodes);
+  }
+
+  /** Yield the shared panel while keeping the tree (root, expansion, selection) alive. */
+  unmount(): void {
+    if (!this.mounted) return;
+    this.mounted = false;
+    this.bindings.abort();
+    this.detached.replaceChildren(...this.scroller.childNodes);
   }
 
   // ── Public API ──────────────────────────────────────────────────────
@@ -208,7 +238,7 @@ export class FileTree {
       this.root = null;
       this.selectedPath = null;
       this.focusedNode = null;
-      this.scroller.replaceChildren();
+      this.renderTarget.replaceChildren();
       return;
     }
     // Initialize with just the root node (collapsed)
@@ -251,7 +281,7 @@ export class FileTree {
     this.selectedPath = null;
     this.focusedNode = null;
     this.ready = false;
-    this.scroller.replaceChildren();
+    this.renderTarget.replaceChildren();
   }
 
   // ── Node creation ───────────────────────────────────────────────────
@@ -324,9 +354,9 @@ export class FileTree {
   /** Render the root node into the scroller. */
   private renderRoot(): void {
     if (!this.root) return;
-    this.scroller.replaceChildren();
+    this.renderTarget.replaceChildren();
     const el = this.renderNode(this.root);
-    this.scroller.append(el);
+    this.renderTarget.append(el);
     this.updateTabindex();
   }
 
@@ -700,7 +730,7 @@ export class FileTree {
   /** Set is-selected on the target node, removing it from all others. */
   private highlightNode(node: TreeNode): void {
     this.selectedPath = node.path;
-    const rows = this.scroller.querySelectorAll('.file-tree-row.is-selected');
+    const rows = this.renderTarget.querySelectorAll('.file-tree-row.is-selected');
     rows.forEach((row) => row.classList.remove('is-selected'));
     if (node.element) {
       node.element.classList.add('is-selected');
@@ -742,7 +772,7 @@ export class FileTree {
 
   /** Update roving tabindex: only the focused node gets tabIndex=0. */
   private updateTabindex(): void {
-    const rows = this.scroller.querySelectorAll<HTMLElement>('.file-tree-row');
+    const rows = this.renderTarget.querySelectorAll<HTMLElement>('.file-tree-row');
     rows.forEach((row) => { row.tabIndex = -1; });
     const focusTarget = this.focusedNode ?? this.root;
     if (focusTarget?.element) {

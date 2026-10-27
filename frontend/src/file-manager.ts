@@ -199,7 +199,13 @@ export class FileManager {
   private readonly promptAction: NonNullable<FileManagerOptions['prompt']>;
   private readonly onError?: FileManagerOptions['onError'];
   private readonly onStatus?: FileManagerOptions['onStatus'];
-  private readonly bindings = new AbortController();
+  /** Recreated by every `mount()` so `unmount()` can drop all panel listeners at once. */
+  private bindings = new AbortController();
+  /** True while this manager owns the shared panel DOM — see `mount()`. */
+  private mounted = false;
+  /** Retained UI state, replayed onto the panel by `mount()` after a tab switch. */
+  private errorText: string | null = null;
+  private listLoading = false;
 
   private socket: WebSocket | null = null;
   private generation = 0;
@@ -243,8 +249,62 @@ export class FileManager {
     this.promptAction = options.prompt ?? ((message, value) => window.prompt(message, value));
     this.onError = options.onError;
     this.onStatus = options.onStatus;
+    // No DOM work here: construction must be safe for a background session.
+    // The owner calls `mount()` when this manager's session comes to the front.
+  }
+
+  /**
+   * Take ownership of the shared `#file-manager-panel` DOM. The panel exists
+   * once in the page while every session owns a manager instance, so exactly
+   * one manager may paint it at a time; the others keep their socket, cwd,
+   * scroll position and in-flight transfers.
+   */
+  mount(): void {
+    if (this.mounted) return;
+    this.bindings = new AbortController();
     this.bindControls();
-    this.renderDisconnected();
+    this.mounted = true;
+    // Repaint from retained state — the previous owner left anything on screen.
+    this.renderEntries();
+    this.applyPanelState();
+    this.restoreTransferPanel();
+    this.updateStatusText(this.statusCopy);
+    this.updateControls();
+  }
+
+  /**
+   * Release the panel without tearing the session down: socket, transfers and
+   * reconnect timers keep running so a background SFTP upload never stalls.
+   */
+  unmount(): void {
+    if (!this.mounted) return;
+    this.mounted = false;
+    this.bindings.abort();
+  }
+
+  /** Path row / loader / error / empty visibility for a freshly mounted panel. */
+  private applyPanelState(): void {
+    if (!this.mounted) return;
+    this.elements.path.value = this.cwd;
+    this.elements.error.hidden = this.errorText === null;
+    if (this.errorText !== null) this.elements.error.textContent = this.errorText;
+    this.elements.loading.hidden = !this.listLoading;
+    this.elements.empty.hidden = this.listLoading || this.errorText !== null || this.entries.length !== 0;
+  }
+
+  /** Re-paint a transfer that kept running while this session was background. */
+  private restoreTransferPanel(): void {
+    if (!this.mounted) return;
+    if (this.uploadState) {
+      const total = this.uploadState.file.size;
+      this.showProgress('upload', this.uploadState.file.name, total > 0 ? (this.uploadState.acknowledged / total) * 100 : 0);
+      return;
+    }
+    if (this.downloadState) {
+      const { expectedSize, received, name } = this.downloadState;
+      // expectedSize stays null until the server sends it; the next chunk repaints.
+      this.showProgress('download', name, expectedSize && expectedSize > 0 ? (received / expectedSize) * 100 : 0);
+    }
   }
 
   attach(url: string): void {
@@ -352,6 +412,8 @@ export class FileManager {
   }
 
   destroy(): void {
+    // Full teardown, unlike `unmount()`: even retained state goes away.
+    this.mounted = false;
     this.reset();
     this.cwdListeners.clear();
     this.bindings.abort();
@@ -660,7 +722,7 @@ export class FileManager {
     this.homePath = cwd;
     this.history = [cwd];
     this.historyIndex = 0;
-    this.elements.path.value = cwd;
+    if (this.mounted) this.elements.path.value = cwd;
     this.updateControls();
     this.requestList(cwd, 'none');
   }
@@ -675,9 +737,14 @@ export class FileManager {
     if (this.activeListRequest) this.pending.delete(this.activeListRequest);
     const requestId = this.createRequest('list', normalized, { historyMode, historyIndex });
     this.activeListRequest = requestId;
-    this.elements.loading.hidden = false;
-    this.elements.empty.hidden = true;
-    this.elements.error.hidden = true;
+    this.listLoading = true;
+    this.errorText = null;
+    // Background sessions track the loader in state but must not touch the panel.
+    if (this.mounted) {
+      this.elements.loading.hidden = false;
+      this.elements.empty.hidden = true;
+      this.elements.error.hidden = true;
+    }
     this.setStatus({ zh: `正在读取 ${normalized}`, en: `Loading ${normalized}` });
     this.send({ type: 'sftp_list', requestId, path: normalized });
     return requestId;
@@ -721,10 +788,14 @@ export class FileManager {
     }
     this.entries = entries;
     this.selectedIndex = -1;
-    this.elements.path.value = path;
-    this.elements.loading.hidden = true;
-    this.elements.error.hidden = true;
-    this.elements.empty.hidden = entries.length !== 0;
+    this.listLoading = false;
+    this.errorText = null;
+    if (this.mounted) {
+      this.elements.path.value = path;
+      this.elements.loading.hidden = true;
+      this.elements.error.hidden = true;
+      this.elements.empty.hidden = entries.length !== 0;
+    }
     this.renderEntries();
     const truncated = message.isTruncated === true;
     this.setStatus({
@@ -760,6 +831,7 @@ export class FileManager {
   }
 
   private renderEntries(): void {
+    if (!this.mounted) return;
     this.elements.tableBody.replaceChildren();
     if (this.listView) {
       this.listView.render({
@@ -833,6 +905,7 @@ export class FileManager {
     const index = Number(target.dataset.index);
     if (!Number.isInteger(index) || !this.entries[index]) return null;
     this.selectedIndex = index;
+    if (!this.mounted) return this.entries[index];
     for (const row of this.elements.tableBody.rows) {
       const selected = row === target;
       row.setAttribute('aria-selected', String(selected));
@@ -1209,6 +1282,7 @@ export class FileManager {
   }
 
   private updateControls(): void {
+    if (!this.mounted) return;
     const selected = this.selectedEntry();
     const idle = this.ready && !this.hasTransfer() && !this.uploadConfirmationPending;
     this.elements.path.disabled = !this.ready;
@@ -1227,11 +1301,15 @@ export class FileManager {
   private renderDisconnected(channelLost = false, detail?: LocalizedText): void {
     this.entries = [];
     this.selectedIndex = -1;
+    this.listLoading = false;
+    this.errorText = null;
     this.renderEntries();
-    this.elements.loading.hidden = true;
-    this.elements.empty.hidden = true;
-    this.elements.error.hidden = true;
-    this.elements.path.value = '/';
+    if (this.mounted) {
+      this.elements.loading.hidden = true;
+      this.elements.empty.hidden = true;
+      this.elements.error.hidden = true;
+      this.elements.path.value = '/';
+    }
     this.hideProgress();
     if (channelLost) this.setStatus(detail ?? DISCONNECTED_CHANNEL);
     else this.updateStatusText(DISCONNECTED);
@@ -1248,6 +1326,8 @@ export class FileManager {
   }
 
   private showError(message: string): void {
+    this.errorText = message;
+    if (!this.mounted) return;
     this.elements.loading.hidden = true;
     this.elements.empty.hidden = true;
     this.elements.error.textContent = message;
@@ -1315,17 +1395,22 @@ export class FileManager {
 
   private setStatus(copy: LocalizedText): void {
     this.updateStatusText(copy);
+    // The status bar belongs to whoever owns the panel. Step 7 gives background
+    // sessions their own prefixed channel.
+    if (!this.mounted) return;
     this.onStatus?.(this.localize(copy));
   }
 
   private updateStatusText(copy: LocalizedText): void {
     this.statusCopy = copy;
+    if (!this.mounted) return;
     this.elements.status.dataset.i18nZh = copy.zh;
     this.elements.status.dataset.i18nEn = copy.en;
     this.elements.status.textContent = this.localize(copy);
   }
 
   private showProgress(operation: 'upload' | 'download', name: string, percent: number): void {
+    if (!this.mounted) return;
     this.elements.progress.dataset.operation = operation;
     this.elements.progress.dataset.name = name;
     this.elements.progress.hidden = false;
@@ -1335,7 +1420,7 @@ export class FileManager {
   }
 
   private updateProgressLanguage(): void {
-    if (this.elements.progress.hidden) return;
+    if (!this.mounted || this.elements.progress.hidden) return;
     const transfer = this.uploadState ?? this.downloadState;
     const operation = this.elements.progress.dataset.operation;
     const name = this.elements.progress.dataset.name ?? '';
@@ -1352,6 +1437,7 @@ export class FileManager {
   }
 
   private hideProgress(): void {
+    if (!this.mounted) return;
     this.elements.progress.hidden = true;
     this.elements.progressBar.value = 0;
     this.elements.progressLabel.textContent = '';

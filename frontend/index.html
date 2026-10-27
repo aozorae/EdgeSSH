@@ -30,16 +30,16 @@
           >
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
           </button>
-          <a
-            class="brand"
-            href="/"
-            aria-label="Workers WebSSH 首页"
-            data-i18n-aria-label-zh="Workers WebSSH 首页"
-            data-i18n-aria-label-en="Workers WebSSH home"
-          >
+          <!--
+            纯展示，不再跳转：这里原本是 href="/" 的链接，点击会整页导航，
+            而 initialize() 末尾的 restorePersistedSessions() 又会把用户自动
+            带回工作台 —— 首页一闪而过且渲染不出会话数量。返回首页请用顶栏
+            右侧的「← 主机总览」按钮（走 leaveWorkspace/show/refresh）。
+          -->
+          <div class="brand">
             <span class="brand-mark" aria-hidden="true">&gt;_</span>
             <span><strong>Edge</strong>SSH</span>
-          </a>
+          </div>
         </div>
 
         <div class="topbar-actions">
@@ -273,6 +273,8 @@
                   <span class="live-orb idle" id="live-orb" role="status" aria-live="polite" aria-atomic="true" title="离线">
                     <span id="live-orb-label" class="sr-only">离线</span>
                   </span>
+                  <!-- 与左侧主机列表同一套信息：国旗 + 主机名称 + user@host:port，状态仍占第二行。 -->
+                  <span id="session-flag" class="session-flag" hidden></span>
                   <div>
                     <strong id="session-title">无活动会话</strong>
                     <span id="session-subtitle">选择目标并连接</span>
@@ -340,14 +342,16 @@
                   </button>
                 </div>
               </div>
+              <div
+                id="session-tabs"
+                class="session-tabs"
+                role="tablist"
+                aria-label="会话标签"
+                data-i18n-aria-label-zh="会话标签"
+                data-i18n-aria-label-en="Session tabs"
+                hidden
+              ></div>
               <div id="terminal-stage" class="terminal-stage">
-                <div
-                  id="terminal"
-                  role="application"
-                  aria-label="SSH 终端"
-                  data-i18n-aria-label-zh="SSH 终端"
-                  data-i18n-aria-label-en="SSH terminal"
-                ></div>
                 <div id="terminal-empty" class="terminal-empty">
                   <div class="empty-glyph" aria-hidden="true">&gt;_</div>
                   <h2 data-i18n-zh="终端已就绪" data-i18n-en="Your terminal is ready">终端已就绪</h2>

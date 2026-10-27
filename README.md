@@ -8,7 +8,7 @@
 
 <p><sub>An open-source, self-hosted WebSSH client on Cloudflare Workers — browser-based SSH terminal, SFTP file manager, and server monitoring.</sub></p>
 
-**Cloudflare-native · Self-hosted · Single-admin · Open source**
+**Cloudflare-native · Self-hosted · Single-admin · Multi-session · Open source**
 
 <br />
 
@@ -44,7 +44,7 @@
 <details>
 <summary><strong>快速导航 · 功能、部署与技术说明</strong></summary>
 
-- **了解产品**：[为什么是 EdgeSSH](#为什么是-edgessh) · [功能特性](#功能特性) · [当前支持](#当前支持)
+- **了解产品**：[为什么是 EdgeSSH](#为什么是-edgessh) · [功能特性](#功能特性) · [多会话选项卡](#session-tabs) · [地球与平铺地图](#globe-map) · [当前支持](#当前支持)
 - **开始使用**：[快速部署](#快速部署) · [认证方式](#认证) · [完整部署指南](https://edgessh-docs.pages.dev/deploy/actions)
 - **了解边界**：[安全设计](#安全设计) · [信任边界](#信任边界) · [端口转发安全](#端口转发安全)
 - **参与开发**：[本地开发](#本地开发) · [项目结构](#项目结构) · [Contributing](#contributing)
@@ -78,7 +78,7 @@ EdgeSSH 想解决的是另一件事：
 
 EdgeSSH 把 WebSSH 的连接层、主机管理与工作台界面，一起部署在 Cloudflare 上。
 
-浏览器只负责交互；应用逻辑与认证交给 Cloudflare Worker；每一个 SSH 会话都由独立的 Durable Object 承载，再通过 Cloudflare TCP Sockets 连到你的服务器。
+浏览器只负责交互；应用逻辑与认证交给 Cloudflare Worker；每一个 SSH 会话都由独立的 Durable Object 承载，再通过 Cloudflare TCP Sockets 连到你的服务器。一个页面可以同时持有多个这样的会话，互不干扰。
 
 <table>
 <tr>
@@ -100,6 +100,8 @@ EdgeSSH 把 WebSSH 的连接层、主机管理与工作台界面，一起部署�
 不只是一个 Terminal。
 
 主机、文件、进程、代码片段和远程服务，都在同一个工作台里。
+
+多条会话可以并行挂着，用选项卡切换。
 
 </td>
 
@@ -164,6 +166,34 @@ EdgeSSH 把散落各处的服务器连接信息，收进统一的主机库。
 
 ---
 
+<a id="session-tabs"></a>
+
+### 🗂️ 多会话选项卡 · Session Tabs
+
+**一个工作台,不再只有一条连接。**
+
+终端页顶部是一条会话选项卡:每一条 SSH 连接各占一栏,切换时谁都不会被断开。
+
+- 同时保持多个会话:同一台主机最多 **3** 条,全局最多 **10** 条
+- 切走的会话在后台继续运行,长任务不会因为你去看了另一台主机而中断
+- 顶栏显示当前会话所在主机的国旗与名称,浏览器标签页标题跟着当前主机走
+- 键盘:`←` / `→` 循环切换,`Delete` / `Backspace` 关闭当前选项卡
+- 每一栏带连接状态点:空闲 / 连接中 / 已连接 / 断开中 / 错误
+- **关闭选项卡才是显式断开**;刷新或误关页面不会让会话立刻消失
+
+#### 刷新之后,还是同一个 shell
+
+页面重载时,Durable Object 会把 SSH 连接短暂留着,新页面凭本地保存的会话身份把它接回来:
+
+- 保留窗口默认 **5 分钟**,配置上限 **30 分钟**
+- 本地只保存会话身份(目标、名称、后端会话 ID),**不保存密码与私钥**
+- 超过 24 小时的恢复记录直接丢弃,而不是给一个"也许还回得来"的假象
+- shell 确实已经结束,就需要重新输入一次凭据——这也正是值得把 shell 捡回来的原因
+
+> 保留期间的会话仍然占用 Durable Object 资源。主动断开会立即销毁;只有刷新、短暂掉线、误关标签这类"没有要求断开"的情况才会被保留。
+
+---
+
 ### 🖥️ SSH 在线终端 · Terminal
 
 **打开浏览器，就是进了服务器。**
@@ -181,6 +211,8 @@ EdgeSSH 把散落各处的服务器连接信息，收进统一的主机库。
 - 密码认证
 - keyboard-interactive
 - OpenSSH 私钥认证
+- OpenSSH 口令加密私钥(bcrypt KDF)
+- 多会话并行([见上文选项卡](#session-tabs))
 
 ![EdgeSSH 终端命令工作流](docs/images/showcase/03-terminal-command-workflow.png)
 
@@ -207,7 +239,9 @@ EdgeSSH 内置了一个基于 SFTP 的文件管理器：
 - 文件类型图标
 - 从文件管理器直接跳回 SSH Terminal
 
-Terminal 与 File Manager 共用同一个 SSH 会话，切换之间不必重新连接。
+同一个会话里的 Terminal 与 File Manager 共用一条 SSH 连接，切换之间不必重新连接。
+
+文件树、进程监控与端口转发都跟随当前所在的选项卡：切到哪一条会话，看到的就是那一台服务器的文件与进程。
 
 ---
 
@@ -268,7 +302,11 @@ journalctl -xe
 
 代码片段通过 D1 同步,而不是只存在某一个浏览器里。
 
+入口收进了终端页顶栏的「快捷命令指令」下拉,不用再展开侧边面板就能取用。
+
 ---
+
+<a id="globe-map"></a>
 
 ### 🌍 服务器,也可以从地球上看
 
@@ -276,9 +314,30 @@ EdgeSSH 会根据服务器的公网 IP,估算出大致地理位置,并画在 Das
 
 点一下主机,就能从地图直接跳进对应的服务器。
 
+#### 两种形态,一次过渡
+
+- **自转球体**:只画正面的标记,主机随地球慢慢转过来
+- **平铺世界地图**:把整幅世界一次性展开,所有主机同屏可见,横向吃满整个面板
+
+两种形态之间用同一批采样点做「展开 / 收拢」过渡,来回切换不需要重新加载数据。
+
+#### 按大洲统计,点一下就聚焦
+
+标题右侧列出了每台主机所属的大洲,以及各自的数量:
+
+```text
+亚洲：2    欧洲：1    北美洲：2    位置未知：1
+```
+
+- 只有确实有主机的大洲才会出现,数量为零的不占位
+- 点一个大洲:球体**转到该大洲正对屏幕并停住自转**;平铺地图则**放大到该大洲铺满画布**,其他大洲自然移出画面
+- 再点一次就取消,世界恢复自转 / 恢复完整平铺
+- 带着选中的大洲切换两种形态,新形态仍然框住同一个大洲
+- 解析不到位置的主机统一归入 **位置未知**,它只计数、不可点:没有坐标,就没有可以聚焦的地方
+
 地球组件用的是轻量的 Canvas 球面投影,没有引入 Three.js 这类较重的 3D Runtime。
 
-> 地理位置仅用于可视化展示,不代表服务器的实时在线状态。
+> 地理位置仅用于可视化展示,不代表服务器的实时在线状态。南极洲不在可选大洲之内。
 
 ---
 
@@ -291,11 +350,13 @@ EdgeSSH 会根据服务器的公网 IP,估算出大致地理位置,并画在 Das
         │                   │                   │
       Hosts              Workspace           Tools
         │                   │                   │
-    Credentials          Terminal          File Manager
-      Groups              SFTP             Monitoring
-    Locations           Sessions           Snippets
+    Credentials       Session Tabs          File Manager
+      Groups              Terminal           Monitoring
+    Locations              SFTP              Snippets
         │                   │             Port Forward
         └───────────────────┼───────────────────┘
+                            │
+                     Globe & Flat Map
                             │
                        Your Servers
 ```
@@ -338,6 +399,8 @@ SSH 握手、认证、密钥交换以及 Channel 通信,都在 Worker 一侧完�
 
 浏览器实际连接的是你的 EdgeSSH Worker,而不是直接跟目标服务器建立 TCP 连接。
 
+多会话模式下,一个页面可以同时持有多个 Session Ticket:每一个都对应自己的 Durable Object 与自己的那条 SSH 连接。页面重载时 Worker 侧仍按保留窗口留着对应的 Durable Object,等同一个 shell 被接回来。
+
 ### 用到的 Cloudflare 能力
 
 **Workers**
@@ -347,6 +410,8 @@ SSH 握手、认证、密钥交换以及 Channel 通信,都在 Worker 一侧完�
 **Durable Objects**
 
 给每个 SSH 会话一份独立的生命周期与 WebSocket 状态。
+
+多会话下每个页面可以同时挂着多个 Durable Object;断开连接后,Durable Object 还会在保留窗口内继续持有那条 SSH 连接,等客户端回来接管同一个 shell。
 
 **D1**
 
@@ -426,9 +491,11 @@ EdgeSSH 不开放注册,也没有多租户的数据隔离逻辑。
 
 ### Session Isolation
 
-每个 SSH 会话都由 Durable Object 单独管理。
+每个 SSH 会话都由自己的 Durable Object 单独管理:终端缓冲、文件树、进程面板和凭据快照都在会话内部,多会话之间互不共享。
 
 会话入口使用临时票据,辅助连接也会做身份检查。
+
+浏览器本地只为「恢复」保存会话身份(目标、名称、后端会话 ID),**不保存任何凭据**;超过 24 小时的记录会自动丢弃。保留窗口结束后要重新接回 shell,就必须重新认证一次。
 
 ### SSRF Protection
 
@@ -531,13 +598,18 @@ Random Encryption Key
 | OS Detection | ✅ |
 | Code Snippets | ✅ |
 | HTTP Port Forward | ✅ |
+| Multiple Sessions | ✅ 选项卡管理,同一主机 3 条 / 全局 10 条 |
+| Session Resume | ✅ 页面重载后接管原 shell(保留窗口默认 5 分钟) |
+| Globe & Flat Map | ✅ 双形态,支持按大洲聚焦 |
+| Encrypted Private Keys | ✅ OpenSSH 口令加密私钥(bcrypt KDF) |
 | Multiple Admins | ❌ |
 | SCP | ❌ |
 | ProxyJump | ❌ |
 | SSH Agent | ❌ |
-| Encrypted Private Keys | 暂不支持 |
 
 单一管理员工作区,最多可以保存 **200 台主机**。
+
+同时最多保持 **10 条 SSH 会话**,其中到同一台主机最多 **3 条**。
 
 SFTP 单文件上传和下载的上限是 **64 MiB**。
 
@@ -623,9 +695,10 @@ npm run dev:web
 EdgeSSH/
 ├── .github/workflows/    GitHub Actions deployment
 ├── frontend/             Web workspace
+│   └── src/              Session tabs, globe & flat map, workspace UI
 ├── src/
 │   ├── accounts/         Authentication & encrypted storage
-│   ├── backend/          Sessions, SFTP & system detection
+│   ├── backend/          Sessions, session retention, SFTP & system detection
 │   ├── ssh/              SSH protocol implementation
 │   └── worker.ts         Worker entry
 ├── migrations/           D1 migrations
@@ -633,6 +706,18 @@ EdgeSSH/
 ├── DEPLOYMENT.md         Deployment documentation
 └── wrangler.toml         Cloudflare configuration
 ```
+
+前端与多会话、地图相关的几个模块:
+
+| 模块 | 职责 |
+| --- | --- |
+| `frontend/src/session-manager.ts` | 持有全部会话,决定谁绑定到共享终端 DOM |
+| `frontend/src/session-context.ts` | 单个会话的状态容器:连接、终端、凭据快照 |
+| `frontend/src/session-tabs.ts` | 选项卡条(纯视图,不含业务决策) |
+| `frontend/src/session-store.ts` | 刷新后恢复用的会话身份存储 |
+| `src/backend/session-retention.ts` | Worker 侧的会话保留策略 |
+| `frontend/src/globe.ts` | 球体 / 平铺双形态与大洲聚焦 |
+| `frontend/src/continents.ts` | 国家码到大洲的判定与视图范围 |
 
 ---
 
@@ -646,9 +731,24 @@ EdgeSSH 基于:
 
 在原有的 Cloudflare WebSSH 能力之上,EdgeSSH 又加上了:
 
-**Host Management · Encrypted Storage · File Manager · Monitoring · GitHub OAuth · Port Forwarding · Code Snippets · Globe Visualization**
+**Host Management · Encrypted Storage · File Manager · Monitoring · GitHub OAuth · Port Forwarding · Code Snippets · Multi-session Tabs · Session Resume · Globe & Flat Map · Continent Focus**
 
 感谢原作者 **CM / cmliu** 打下的这份开源基础。
+
+### 与上游单会话模式的差异
+
+上游形态是「一个页面 = 一条 SSH 连接」。本版本做了架构级改动:
+
+| | 上游(单会话) | 本版本(多会话) |
+| --- | --- | --- |
+| 连接状态 | 全局唯一的模块级变量 | 每个会话一份 `SessionContext`,由 `SessionManager` 调度 |
+| 终端 DOM | 与连接一一绑定 | 多会话共享,只有前台会话被 attach |
+| 切换主机 | 断开重连 | 切走但不断开,后台继续运行 |
+| 刷新页面 | 会话丢失 | 保留窗口内可接管同一个 shell |
+| 文件 / 进程 / 转发 | 全局单例 | 跟随当前会话 |
+| 并发 | 1 条 | 同一主机 3 条 / 全局 10 条 |
+
+**升级时 Worker 与前端需要一起部署**:会话保留能力在 Worker 侧(`src/backend/session-retention.ts`),只更新前端会让恢复静默失效、回落成重新连接。
 
 ---
 

@@ -36,8 +36,8 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
   min-height: 80px; padding: 16px 28px; display: flex; align-items: center; gap: 28px;
   border-bottom: 1px solid var(--home-line); background: var(--home-surface);
 }
-.home-brand { display: inline-flex; gap: 0; align-items: center; text-decoration: none; font-family: var(--home-display); font-weight: 750; font-size: 23px; letter-spacing: -.7px; white-space: nowrap; }
-.home-brand > span:last-child { color: var(--home-accent); }
+#dashboard .home-brand { display: inline-flex; gap: 0; align-items: center; background: none; padding: 0; color: inherit; text-decoration: none; font-family: var(--home-display); font-weight: 750; font-size: 23px; letter-spacing: -.7px; white-space: nowrap; }
+#dashboard .home-brand > span:last-child { color: var(--home-accent); }
 .brand-chevron { margin-right: 14px; color: var(--home-accent); font-family: var(--home-mono); font-size: 30px; }
 .home-search { max-width: 480px; min-width: 160px; flex: 1; display: flex; align-items: center; gap: 12px; background: var(--home-bg); border: 1px solid var(--home-line); border-radius: 9px; padding: 0 14px; color: var(--home-muted); }
 #dashboard .home-search input { min-width: 0; width: 100%; height: 44px; border: none; padding: 0; background: transparent; color: var(--home-ink); box-shadow: none; }
@@ -56,10 +56,21 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
 #dashboard .rail-item { min-height: 74px; padding: 12px 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: none; color: var(--home-muted); border-radius: 8px; font-size: 12px; white-space: nowrap; }
 #dashboard .rail-item.selected { color: var(--home-accent-hover); background: var(--home-accent-soft); box-shadow: inset 2px 0 var(--home-accent); }
 #dashboard .rail-item:hover { background: var(--home-bg); color: var(--home-accent); }
+/* 会话中心入口上的红点：有多少条会话还在跑，不用切过去就知道。 */
+#dashboard .rail-item { position: relative; }
+.rail-badge {
+  position: absolute; top: 8px; right: 10px; min-width: 18px; height: 18px; padding: 0 5px;
+  display: grid; place-items: center; border-radius: 9px;
+  background: var(--home-accent); color: var(--home-surface);
+  font-family: var(--home-mono); font-size: 10px; font-weight: 700; line-height: 1;
+}
+.rail-badge[hidden] { display: none; }
 .rail-security { margin-top: auto; padding: 24px 0 4px; text-align: center; color: var(--home-muted); font-size: 10px; }
 .rail-security svg { display: block; margin: 0 auto 8px; color: var(--home-success); }
 .home-content { width: 100%; max-width: 1450px; margin-inline: auto; padding: 36px 32px 20px; min-width: 0; }
-.home-main-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); min-height: 490px; }
+/* The two columns split evenly now: the wider one went to the map, whose flat
+   shape needs width far more than the list does. */
+.home-main-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 490px; }
 .hosts-pane { padding-right: 28px; min-width: 0; }
 .home-section-heading { display: flex; gap: 16px; align-items: center; justify-content: space-between; margin-bottom: 23px; }
 .home-eyebrow { font-family: var(--home-mono); font-size: 10px; letter-spacing: 1.6px; font-weight: 500; margin: 0 0 10px; color: var(--home-muted); }
@@ -91,6 +102,31 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
 .country-flag { flex: 0 0 auto; object-fit: cover; border-radius: 1px; }
 .host-location .country-flag { width: 30px; height: 22.5px; align-self: center; }
 #dashboard .connect-host { min-height: 36px; padding: 7px 11px; font-size: 13px; }
+#dashboard .home-button.danger { color: var(--home-danger); border-color: #f1c9c4; }
+#dashboard .home-button.danger:hover { background: #fef3f2; border-color: var(--home-danger); }
+/* 「连接」与会话徽标装在一起，共占原来的一列，免得行网格再宽出一列。 */
+.host-actions { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+#dashboard .host-session-badge {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 28px; min-height: 36px; padding: 4px 8px;
+  border-radius: 7px; border: 1px solid var(--home-accent); background: var(--home-accent-soft);
+  color: var(--home-accent-hover); font-family: var(--home-mono); font-size: 12px; font-weight: 700;
+}
+#dashboard .host-session-badge::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--home-accent); flex: 0 0 auto; }
+#dashboard .host-session-badge:hover { background: #ffe3d6; }
+#dashboard .host-session-badge[aria-expanded='true'] { box-shadow: inset 0 0 0 1px var(--home-accent); }
+.session-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; width: max(260px, 100%);
+  padding: 8px; border: 1px solid var(--home-line); border-radius: 9px;
+  background: var(--home-surface); box-shadow: 0 14px 40px var(--home-shadow);
+}
+.session-menu-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 7px 6px; border-radius: 7px; }
+.session-menu-row + .session-menu-row { margin-top: 4px; }
+.session-menu-label { min-width: 0; font-size: 12px; font-family: var(--home-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-menu-state { font-size: 10px; color: var(--home-muted); white-space: nowrap; }
+.session-menu-state.connected { color: var(--home-success); }
+.session-menu-state.connecting, .session-menu-state.disconnecting { color: #b54708; }
+.session-menu-state.error { color: var(--home-danger); }
+#dashboard .session-menu-button { min-height: 30px; padding: 5px 9px; font-size: 11px; }
 #dashboard .host-row-action { padding: 8px 1px; background: none; color: var(--home-muted); font-size: 12px; min-height: 36px; white-space: nowrap; }
 #dashboard .host-row-action:hover { color: var(--home-accent-hover); }
 #dashboard .host-row-action.delete { font-size: 20px; }
@@ -101,12 +137,26 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
 .home-empty svg { display: block; margin: 0 auto 16px; color: var(--home-accent); }
 .home-empty strong { display: block; color: var(--home-ink); font-size: 16px; font-weight: 500; }
 .home-empty p { font-size: 12px; margin: 8px 0 0; }
-.globe-pane { position: relative; min-width: 0; padding: 0 0 0 24px; border-left: 1px solid var(--home-line); background-image: radial-gradient(var(--home-line) .75px, transparent .75px); background-size: 12px 12px; }
-.globe-heading { position: absolute; top: 4px; left: 26px; z-index: 15; pointer-events: none; }
+.globe-pane { position: relative; min-width: 0; padding: 0 0 0 12px; border-left: 1px solid var(--home-line); background-image: radial-gradient(var(--home-line) .75px, transparent .75px); background-size: 12px 12px; }
+.globe-heading { position: absolute; top: 4px; left: 14px; z-index: 15; pointer-events: none; }
 .globe-heading h2 { margin: 0; font-size: clamp(21px, 2vw, 28px); letter-spacing: -.8px; line-height: 1.35; font-weight: 650; }
 .globe-heading h2 span { color: var(--home-accent); }
 .globe-heading > p:last-child { color: var(--home-muted); font-size: 12px; margin-top: 8px; }
-.host-globe { width: min(100%, 520px); aspect-ratio: 1; margin: 38px auto 0; position: relative; }
+/* 大洲统计：紧贴标题右侧，沿用分组筛选chips的排字与选中下划线。 */
+.globe-title-row { display: flex; align-items: flex-start; gap: 26px; }
+.globe-stats { display: flex; flex-wrap: wrap; gap: 4px 12px; max-width: 268px; padding-top: 2px; pointer-events: auto; }
+#dashboard .globe-stat { padding: 5px 2px; color: var(--home-muted); background: none; font-size: 12px; white-space: nowrap; border-bottom: 3px solid transparent; }
+#dashboard .globe-stat b { color: var(--home-ink); font-family: var(--home-mono); font-weight: 650; }
+#dashboard .globe-stat:hover:not(:disabled) { color: var(--home-accent-hover); }
+#dashboard .globe-stat[aria-pressed="true"] { color: var(--home-ink); border-color: var(--home-accent); }
+#dashboard .globe-stat[aria-pressed="true"] b { color: var(--home-accent-hover); }
+/* 位置未知只是计数，没有可聚焦的地方，所以它不是可点的控件。 */
+#dashboard .globe-stat.is-unknown { cursor: default; opacity: .8; }
+/* Wider than square: the globe only ever needed the short side, and the extra
+   width is exactly what the unrolled map draws itself with. The floor keeps the
+   globe its old size on narrower columns — only genuinely wide ones get the
+   extra width, so nothing ever shrinks to make room for the map. */
+.host-globe { width: min(100%, 640px); aspect-ratio: 1.15; min-height: 520px; margin: 38px auto 0; position: relative; }
 .host-globe canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: pan-y; }
 .host-globe canvas:active { cursor: grabbing; }
 #dashboard .globe-marker { position: absolute; top: 0; left: 0; display: flex; gap: 7px; align-items: center; padding: 0; margin: -10px 0 0 -10px; background: transparent; text-align: left; color: var(--home-ink); }
@@ -117,6 +167,9 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
 .globe-marker.compact .globe-label { display: none; }
 .globe-marker:hover .globe-label, .globe-marker:focus-visible .globe-label { display: block; }
 .globe-meta { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; color: var(--home-muted); font-size: 12px; }
+.globe-actions { display: flex; align-items: center; gap: 14px; }
+/* Kept in the layout (just invisible): the unrolled map has no spin to pause. */
+#dashboard #pause-globe.is-hidden { visibility: hidden; }
 .globe-caption { margin: 0; padding: 0 16px; color: var(--home-muted); font-size: 10px; }
 .home-bottom { margin-top: 28px; display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 16px; }
 .storage-note, #dashboard .quick-card { display: flex; align-items: center; gap: 16px; border: 1px solid var(--home-line); border-radius: 9px; background: var(--home-surface); padding: 23px; text-align: left; }
@@ -167,7 +220,7 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
   .hosts-pane { padding-right: 18px; }
   .host-row { grid-template-columns: 32px minmax(0, 1fr) auto auto 22px; gap: 8px; }
   .host-location { grid-column: 2; grid-row: 2; max-width: none; }
-  .host-row .connect-host { grid-column: 3; grid-row: 1 / 3; }
+  .host-row .host-actions { grid-column: 3; grid-row: 1 / 3; }
   .host-row .host-row-action { grid-column: 4; grid-row: 1 / 3; }
   .host-row .host-row-action.delete { grid-column: 5; }
   .storage-tag { display: none; }
@@ -178,13 +231,18 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
   .hosts-pane { padding-right: 0; }
   .globe-pane { margin-top: 30px; padding: 0; border-left: 0; border-top: 1px solid var(--home-line); }
   .globe-heading { top: 22px; left: 16px; }
-  .host-globe { max-width: 420px; margin-top: 24px; }
+  /* 单列后标题右侧没有富余宽度，统计改为跟着标题换行排在下方。 */
+  .globe-title-row { flex-wrap: wrap; gap: 12px; }
+  .globe-stats { max-width: 100%; }
+  /* Stacked under the list there is no spare width to buy, so the box goes back
+     to being square and gives the globe the full span. */
+  .host-globe { max-width: 420px; margin-top: 24px; aspect-ratio: 1; min-height: 0; }
   .home-bottom { grid-template-columns: minmax(0, 1fr); }
   .home-search kbd { display: none; }
 }
 @media (max-width: 600px) {
   .home-header { flex-wrap: wrap; padding: 12px 16px; gap: 12px; }
-  .home-brand { font-size: 21px; }
+  #dashboard .home-brand { font-size: 21px; }
   .home-search { order: 3; flex-basis: 100%; max-width: none; }
   .home-account { margin-left: auto; }
   #dashboard .header-add { display: none; }
@@ -202,7 +260,7 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
   .host-row { grid-template-columns: 28px minmax(0, 1fr) auto 30px; gap: 7px; padding: 11px 9px; }
   .host-row .host-row-action:not(.delete) { grid-row: 2; grid-column: 3; }
   .host-row .host-row-action.delete { grid-column: 4; }
-  .host-row .connect-host { grid-row: 1; }
+  .host-row .host-actions { grid-row: 1; }
   .host-copy strong { font-size: 13px; }
   .host-copy > span { font-size: 11px; }
   .host-symbol { width: 28px; height: 28px; border-radius: 7px; }
@@ -220,6 +278,23 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
   #dashboard .host-form-grid :is(input, select, textarea), #dashboard .home-search input { font-size: 16px; }
   .home-footer { font-size: 10px; line-height: 1.8; }
 }
+/* 会话中心：会话的居住地。屋里只摆真正开着的那几条，闭合时机与处在 tab 栏一致。 */
+.sessions-page { padding: 36px 32px 20px; width: 100%; max-width: 1450px; margin-inline: auto; min-width: 0; }
+.sessions-page[hidden] { display: none; }
+#dashboard .sessions-page .home-eyebrow { margin: 0; }
+.session-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.session-card { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--home-line); border-radius: 9px; padding: 16px 18px; background: var(--home-surface); }
+.session-card.current { border-color: var(--home-accent); box-shadow: inset 3px 0 var(--home-accent); }
+.session-card-heading { display: flex; align-items: center; gap: 10px; }
+.session-card-heading strong { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.session-state { font-size: 11px; color: var(--home-muted); white-space: nowrap; }
+.session-state.connected { color: var(--home-success); }
+.session-state.connecting, .session-state.disconnecting { color: #b54708; }
+.session-state.error { color: var(--home-danger); }
+.session-current-tag { margin-left: auto; padding: 2px 7px; border-radius: 10px; background: var(--home-accent-soft); color: var(--home-accent-hover); font-size: 10px; white-space: nowrap; }
+.session-card-meta { font-size: 11px; color: var(--home-muted); font-family: var(--home-mono); overflow-wrap: anywhere; }
+.session-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+.session-card-actions .home-button { min-height: 34px; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { #dashboard * { transition: none !important; } }
 
 /* 窄屏时顶栏六个按钮放不下：收紧间距并允许文字按钮收缩（超出部分省略号），保证不越出屏幕。 */
@@ -227,4 +302,20 @@ body[data-view='dashboard'] { overflow-y: auto; background: var(--home-bg); }
   /* 同样要压过 style.css 里的同名基础规则。 */
   .topbar .topbar-actions { gap: 6px; }
   .topbar-actions .home-back { flex: 0 1 auto; padding-inline: 7px; font-size: 11px; }
+}
+
+/* 会话 UI 的三档断点：宽屏浮层跟着徽标走，中间档单列，窄屏把它摊平到视口底部。 */
+@media (max-width: 950px) {
+  .sessions-page { padding: 28px 22px 20px; }
+  .session-list { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 600px) {
+  .sessions-page { padding: 24px 16px 20px; }
+  .session-card { padding: 14px; }
+  .session-card-actions .home-button { flex: 1 1 auto; min-height: 40px; }
+  /* 主机行的列本来就挤，浮层跟着徽标会溢出屏幕：改为通栏贴在视口底部。 */
+  .session-menu { position: fixed; top: auto; bottom: 14px; left: 14px; right: 14px; width: auto; z-index: 60; }
+  .session-menu-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .session-menu-label { flex: 1 1 auto; }
+  .session-menu-button { flex: 1 1 40%; min-height: 40px; }
 }

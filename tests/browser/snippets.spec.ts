@@ -50,50 +50,46 @@ test('主页片段库支持十条默认命令、搜索、新建、多行编辑�
   await page.screenshot({ path: testInfo.outputPath('snippet-library.png'), fullPage: true });
 });
 
-test('终端浮窗折叠、拖动与键盘复位；填入草稿而不执行，编辑与管理页同步', async ({ page }, testInfo) => {
+test('顶栏下拉收放自如；填入草稿而不执行，编辑与管理页同步', async ({ page }, testInfo) => {
   const files = await fixture(page);
   await connectFiles(page);
   await page.locator('#files-terminal').click();
+  const toggle = page.locator('#snippet-toggle');
   const panel = page.locator('#snippet-panel');
-  const expand = panel.getByRole('button', { name: '展开代码片段' });
-  if (await expand.count()) await expand.click();
+  // 它不再常驻在终端上方：默认收起，点开才出现。
+  await expect(panel).toBeHidden();
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(panel).toBeVisible();
   await expect(panel.locator('.snippet-card')).toHaveCount(10);
   await panel.getByRole('button', { name: '使用 查看磁盘空间', exact: true }).click();
   await expect(page.locator('#command-editor-input')).toHaveValue('df -h');
   expect(files.calls.filter((call) => call.type === 'input')).toHaveLength(0);
   await page.locator('#command-editor-send').click();
   await expect.poll(() => files.calls.filter((call) => call.type === 'input').at(-1)?.data).toBe('df -h\r');
-  if (await panel.getByRole('button', { name: '收起代码片段' }).count()) await panel.getByRole('button', { name: '收起代码片段' }).click();
-  await expect(page.locator('#snippet-panel-body')).toBeHidden();
-  const handle = panel.getByRole('button', { name: '移动代码片段窗口' });
-  const before = (await panel.boundingBox())!;
-  await handle.focus();
-  await page.keyboard.press('ArrowLeft');
-  const after = (await panel.boundingBox())!;
-  expect(after.x).toBeLessThan(before.x);
-  await page.keyboard.press('Home');
-  if (testInfo.project.name === 'desktop') {
-    const box = (await handle.boundingBox())!;
-    await page.mouse.move(box.x + 30, box.y + 20);
-    await page.mouse.down();
-    await page.mouse.move(box.x - 100, box.y + 60, { steps: 8 });
-    await page.mouse.up();
-    expect((await panel.boundingBox())!.x).toBeLessThan(before.x);
-  }
-  await panel.getByRole('button', { name: '展开代码片段' }).click();
+  // 点别处收起，再点回来展开，最后 Esc 也能收。
+  await page.locator('#session-title').click();
+  await expect(panel).toBeHidden();
+  await toggle.click();
+  await expect(panel).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(panel).toBeHidden();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await toggle.click();
   await panel.getByRole('button', { name: '编辑 查看磁盘空间', exact: true }).click();
   await page.getByRole('dialog').getByLabel('名称').fill('磁盘概况');
   await page.getByRole('button', { name: '保存片段', exact: true }).click();
-  await panel.getByRole('button', { name: '管理代码片段', exact: true }).click();
+  await panel.getByRole('button', { name: '管理快捷命令指令', exact: true }).click();
   await expect(page.locator('#snippets-page').getByRole('heading', { name: '磁盘概况', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '打开 SSH 终端 ↗', exact: true }).click();
   expect(files.calls.filter((call) => call.type === 'connect')).toHaveLength(1);
+  await toggle.click();
   await expect(panel).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('snippet-terminal.png'), fullPage: true });
 });
 
-test('浮窗片段使用两行紧凑布局、可访问图标和完整命令，触屏按钮可点击', async ({ page }, testInfo) => {
+test('下拉片段使用两行紧凑布局、可访问图标和完整命令，触屏按钮可点击', async ({ page }, testInfo) => {
   await fixture(page);
   const longName = '部署前检查磁盘空间与服务状态 deployment preflight check';
   const longCommand = `echo ${'deployment-check-'.repeat(30)}\nprintf 'first\\nsecond\\n'\npwd`;
@@ -104,7 +100,7 @@ test('浮窗片段使用两行紧凑布局、可访问图标和完整命令，�
   await connectFiles(page);
   await page.locator('#files-terminal').click();
   const panel = page.locator('#snippet-panel');
-  if (await panel.getByRole('button', { name: '展开代码片段' }).count()) await panel.getByRole('button', { name: '展开代码片段' }).click();
+  await page.locator('#snippet-toggle').click();
   const cards = panel.locator('.snippet-card');
   await expect(cards).toHaveCount(2);
   const buttons = cards.first().locator('.snippet-actions button');
@@ -191,10 +187,12 @@ test('多行片段保留换行且不直接发送；取消覆盖保留旧草稿�
   await page.getByRole('button', { name: '保存片段', exact: true }).click();
   await page.getByRole('button', { name: '打开 SSH 终端 ↗', exact: true }).click();
   const panel = page.locator('#snippet-panel');
-  if (await panel.getByRole('button', { name: '展开代码片段' }).count()) await panel.getByRole('button', { name: '展开代码片段' }).click();
+  await page.locator('#snippet-toggle').click();
+  await expect(panel).toBeVisible();
   await panel.getByRole('button', { name: '使用 多行脚本', exact: true }).click();
   await expect(page.locator('#command-editor-input')).toHaveValue('echo a\n# 注释\necho b');
-  if (await panel.getByRole('button', { name: '展开代码片段' }).count()) await panel.getByRole('button', { name: '展开代码片段' }).click();
+  // 窄屏上一取用就收起让位给终端，宽屏保留；这里只保证入口随时可再打开。
+  if (await panel.isHidden()) await page.locator('#snippet-toggle').click();
   page.once('dialog', (dialog) => dialog.dismiss());
   await panel.getByRole('button', { name: '使用 查看当前目录', exact: true }).click();
   await expect(page.locator('#command-editor-input')).toHaveValue('echo a\n# 注释\necho b');
@@ -204,28 +202,28 @@ test('多行片段保留换行且不直接发送；取消覆盖保留旧草稿�
   await expect(page.locator('#snippets-page .snippet-card')).toHaveCount(0);
 });
 
-test('浮窗在调整尺寸后仍可触达，并适配浅色及减少动态效果', async ({ page }, testInfo) => {
+test('下拉在调整尺寸后仍完整可见，并适配浅色及减少动态效果', async ({ page }, testInfo) => {
   await fixture(page);
   await connectFiles(page);
   await page.locator('#files-terminal').click();
+  const toggle = page.locator('#snippet-toggle');
   const panel = page.locator('#snippet-panel');
-  const initiallyCollapsed = testInfo.project.name === 'mobile';
-  if (initiallyCollapsed) await expect(panel.locator('#snippet-panel-body')).toBeHidden();
-  else await expect(panel.locator('#snippet-panel-body')).toBeVisible();
-  if (initiallyCollapsed) await panel.getByRole('button', { name: '展开代码片段' }).click();
-  await panel.getByRole('button', { name: '移动代码片段窗口' }).focus();
-  for (let i = 0; i < 8; i++) await page.keyboard.press('ArrowDown');
+  await expect(panel).toBeHidden();
+  await toggle.click();
+  await expect(panel.locator('#snippet-panel-body')).toBeVisible();
   await page.setViewportSize({ width: 667, height: 375 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
-  const stage = (await page.locator('#terminal-card').boundingBox())!;
+  // 贴着按钮下方展开，整体留在视口内：不再会长到屏幕外找不着。
+  const anchor = (await toggle.boundingBox())!;
   const box = (await panel.boundingBox())!;
-  expect(box.x).toBeGreaterThanOrEqual(stage.x);
-  expect(box.x + box.width).toBeLessThanOrEqual(stage.x + stage.width + 1);
-  expect(box.y).toBeGreaterThanOrEqual(stage.y);
-  expect(box.y + box.height).toBeLessThanOrEqual(stage.y + stage.height + 1);
-  await panel.getByRole('button', { name: '收起代码片段' }).click();
-  await expect(panel.locator('#snippet-panel-body')).toBeHidden();
-  expect((await panel.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  expect(box.y).toBeGreaterThanOrEqual(anchor.y + anchor.height - 1);
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(668);
+  expect(box.y + box.height).toBeLessThanOrEqual(376);
+  await page.keyboard.press('Escape');
+  await expect(panel).toBeHidden();
+  await toggle.click();
+  await expect(panel.locator('#snippet-panel-body')).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('snippet-landscape-light.png'), fullPage: true });
 });

@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { createElement, Maximize, Minimize } from 'lucide';
 import { historyKey, historyLabel } from './history';
+import { normalizeHostAddress, sessionTargetKey, sessionTargetLabel } from './session-target';
 import { listHosts, hostCredentials, saveHost, removeHost, updateHostSystem, type CloudHost, type Credentials, type HostSystemInfo } from './cloud-api';
 import { Dashboard } from './dashboard';
 import { FilePage } from './file-page';
@@ -18,25 +19,18 @@ import { resetTerminalForConnection } from './terminal-session';
 import { createTerminalTools, type TerminalToolsController } from './terminal-tools';
 import { WebSocketReconnectManager } from './ws-reconnect';
 import type { ReconnectLogEntry } from './ws-reconnect';
+import { NET_SPARK_POINTS, type ConnectionState, type LocalizedMessage, type SessionContext } from './session-context';
+import { MAX_SESSIONS_PER_TARGET, MAX_SESSIONS_TOTAL, SESSION_EVENT, SessionManager } from './session-manager';
+import { createSessionTabBar } from './session-tabs';
+import { forgetRestorableSession, loadRestorableSessions, saveRestorableSessions } from './session-store';
+import type { RestorableSession } from './session-store';
 import './style.css';
 
 type AuthMethod = 'password' | 'publickey';
-type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnecting' | 'error';
 type Language = 'zh-CN' | 'en';
 type Translation = readonly [zh: string, en: string];
 
-interface LocalizedMessage {
-  zh: string;
-  en: string;
-}
-
 type SavedProfile = CloudHost & Credentials;
-
-interface PendingHistory {
-  generation: number;
-  target: string;
-  profile: Promise<SavedProfile>;
-}
 
 type HistoryMutation =
   | { kind: 'upsert'; profile: SavedProfile }
@@ -198,7 +192,7 @@ const SERVER_EVENT_MESSAGES: Record<string, Translation> = {
   tcp_connecting: ['正在连接 SSH 服务器', 'Connecting to the SSH server'],
   authenticating: ['加密传输已建立，正在认证', 'Encrypted transport established; authenticating'],
   host_key_confirmation: ['发送凭据前请确认此主机密钥', 'Confirm this host key before credentials are sent'],
-  auth_success: ['SSH 认证成功，正在打开终端', 'SSH authentication succeeded; opening terminal'],
+  auth_success: ['SSH 认证成功，正在打开终端', 'SSH authentication succeeded; opening ctx.terminal'],
   shell_ready: ['Shell 已就绪', 'Shell is ready'],
   ready: ['交互式 Shell 已就绪', 'Interactive shell ready'],
   remote_closed: ['SSH 服务器已关闭连接', 'The SSH server closed the connection'],
@@ -216,7 +210,7 @@ const SERVER_MESSAGE_TRANSLATIONS: Record<string, string> = {
   'Invalid SSH username': 'SSH 用户名无效',
   'Invalid authentication method': '身份认证方式无效',
   'Unsupported connection field': '包含不支持的连接字段',
-  'Invalid terminal size': '终端尺寸无效',
+  'Invalid ctx.terminal size': '终端尺寸无效',
   'Invalid host key fingerprint': '主机密钥指纹无效',
   'SSH authentication failed': 'SSH 认证失败',
   'Host key was not accepted': '主机密钥未被接受',
@@ -224,7 +218,7 @@ const SERVER_MESSAGE_TRANSLATIONS: Record<string, string> = {
   'The server does not support SSH 2.0': '服务器不支持 SSH 2.0',
   'SSH compression is not supported': '不支持 SSH 压缩',
   'Server-initiated SSH rekey is not supported': '不支持由服务器发起的 SSH 重新密钥交换',
-  'SSH rekey is not supported by this terminal session': '当前终端会话不支持 SSH 重新密钥交换',
+  'SSH rekey is not supported by this ctx.terminal session': '当前终端会话不支持 SSH 重新密钥交换',
   'The SSH server closed the connection': 'SSH 服务器已关闭连接',
   'SSH session ended': 'SSH 会话已结束',
   'Shell is ready': 'Shell 已就绪',
@@ -284,6 +278,7 @@ const ui = {
   themeToggle: element<HTMLButtonElement>('theme-toggle'),
   sessionTitle: element<HTMLElement>('session-title'),
   sessionSubtitle: element<HTMLElement>('session-subtitle'),
+  sessionFlag: element<HTMLElement>('session-flag'),
   liveOrb: element<HTMLElement>('live-orb'),
   liveOrbLabel: element<HTMLElement>('live-orb-label'),
   metricUptime: element<HTMLElement>('metric-uptime'),
@@ -296,7 +291,7 @@ const ui = {
   resourceNetworkSparkline: element<HTMLCanvasElement>('resource-network-sparkline'),
   terminalCard: element<HTMLElement>('terminal-card'),
   terminalStage: element<HTMLElement>('terminal-stage'),
-  terminalElement: element<HTMLElement>('terminal'),
+  sessionTabs: element<HTMLElement>('session-tabs'),
   terminalEmpty: element<HTMLElement>('terminal-empty'),
   emptyConnect: element<HTMLButtonElement>('empty-connect'),
   clearTerminal: element<HTMLButtonElement>('clear-terminal'),
@@ -327,6 +322,118 @@ const ui = {
   rejectHostKey: element<HTMLButtonElement>('reject-host-key'),
   acceptHostKey: element<HTMLButtonElement>('accept-host-key'),
 };
+
+// ---------------------------------------------------------------------------
+// Session tabs + per-session xterm hosts
+//
+// `#terminal-stage` carries one `.term-instance` per session; only the front
+// session's host stays visible so every session keeps its own scrollback and
+// rendered buffer across tab switches.
+// ---------------------------------------------------------------------------
+
+/** Single source for the toolbar orb, the file page badge and the tab dots. */
+const SESSION_STATE_LABEL: Record<ConnectionState, LocalizedMessage> = {
+  idle: localized('离线', 'Offline'),
+  connecting: localized('连接中', 'Connecting'),
+  connected: localized('在线', 'Online'),
+  disconnecting: localized('正在断开', 'Disconnecting'),
+  error: localized('错误', 'Error'),
+};
+
+const sessionTabBar = createSessionTabBar({
+  container: ui.sessionTabs,
+  localize: bilingual,
+  stateLabel: (state) => localize(SESSION_STATE_LABEL[state]),
+  onActivate: (id) => activateSession(id),
+  onClose: (id) => closeSessionTab(id),
+});
+
+/** Create (once) and return the xterm host owned by this session. */
+function mountTerminal(session: SessionContext): HTMLElement {
+  let host = session.terminalEl;
+  if (!host?.isConnected) {
+    host = document.createElement('div');
+    host.className = 'term-instance';
+    host.dataset.session = session.id;
+    // Insert before the empty overlay so an instance never covers its copy.
+    ui.terminalStage.insertBefore(host, ui.terminalEmpty);
+    session.terminalEl = host;
+    session.terminalOpened = false;
+  }
+  if (!session.terminalOpened) {
+    session.terminal.open(host);
+    session.terminalOpened = true;
+  }
+  return host;
+}
+
+/**
+ * One stage, many sessions: whichever instance belongs to the front session is
+ * the only one allowed to take the space. The others keep their xterm buffer
+ * untouched so coming back restores the scrollback exactly where it was.
+ */
+function showOnlyTerminal(session: SessionContext): void {
+  const host = mountTerminal(session);
+  for (const instance of ui.terminalStage.querySelectorAll<HTMLElement>('.term-instance')) {
+    instance.hidden = instance !== host;
+  }
+}
+
+/**
+ * Hand the shared panels (file manager, tree, process manager) to one session.
+ * The DOM is unique; the managers are per session, so everybody else must let
+ * go first. Background managers keep polling their own channels.
+ */
+function mountSessionPanels(session: SessionContext): void {
+  for (const summary of sessions.list()) {
+    if (summary.id === session.id) continue;
+    const other = sessions.get(summary.id);
+    if (!other) continue;
+    other.fileManager?.unmount();
+    other.fileTree?.unmount();
+    other.processManager?.unmount();
+  }
+  session.fileManager?.mount();
+  session.fileTree?.mount();
+  session.processManager?.mount();
+  // The file panel is shared DOM too, so its page follows the new owner.
+  filePage?.setManager(session.fileManager);
+  // Throughput, uptime and friend widgets are one set on screen: drop the old
+  // session's readings so its numbers are never read as the new one's.
+  resetNetworkMetric();
+  updateUptime();
+}
+
+/** Bring a session to the front: it becomes the only visible instance. */
+function activateSession(id: string): void {
+  const session = sessions.get(id);
+  if (!session) return;
+  if (sessions.activeIdOrNull !== id) sessions.activate(id);
+  // Everything below that reads `ctx` (status line, event log, resource meters)
+  // follows the session being looked at.
+  setFrontSession(session);
+  session.terminal.focus();
+}
+
+/** Tabs earn their row only while something is live, or when several exist. */
+function renderSessionTabs(): void {
+  const live = sessions.list().filter((session) => session.state !== 'idle' || sessions.size > 1);
+  sessionTabBar.render(live, sessions.activeIdOrNull);
+}
+
+/**
+ * Closing a tab drops that one session's SSH connection; its context is retired
+ * by `retireSession()` once teardown settles, and every other session — along
+ * with their SFTP transfers and process polling — keeps running.
+ */
+function closeSessionTab(id: string): void {
+  const session = sessions.get(id);
+  if (!session) return;
+  // `error` also needs the teardown — its socket is already gone but the
+  // timers, auxiliary channels and UI state still have to be released.
+  if (session.state !== 'idle') closeSession(session, bilingual('已关闭会话标签', 'Session tab closed'));
+  renderSessionTabs();
+}
 
 function updateRevealPasswordButton(): void {
   const revealed = ui.password.type === 'text';
@@ -363,8 +470,8 @@ function applyLanguage(language: Language, persist = false): void {
   ui.languageToggle.title = toggleLabel;
   updateRevealPasswordButton();
   if (!ui.keyFile.files?.length) ui.keyFileName.textContent = bilingual('未选择文件', 'No file selected');
-  ui.sessionSubtitle.textContent = localize(currentSessionSubtitle);
-  ui.eventMessage.textContent = localize(currentEventMessage);
+  ui.sessionSubtitle.textContent = localize(ctx.subtitle);
+  ui.eventMessage.textContent = localize(ctx.eventMessage);
   if (currentFormError && !ui.formError.hidden) ui.formError.textContent = localize(currentFormError);
   for (const line of ui.eventLog.querySelectorAll<HTMLElement>('.event-line')) {
     const category = line.dataset.category ?? 'session';
@@ -375,9 +482,9 @@ function applyLanguage(language: Language, persist = false): void {
       copy.textContent = bilingual(copy.dataset.messageZh, copy.dataset.messageEn);
     }
   }
-  if (fileManager) fileManager.setLanguage();
-  if (fileTree) fileTree.setLanguage();
-  if (processManager) processManager.setLanguage();
+  if (ctx.fileManager) ctx.fileManager.setLanguage();
+  if (ctx.fileTree) ctx.fileTree.setLanguage();
+  if (ctx.processManager) ctx.processManager.setLanguage();
   terminalTools?.refreshLanguage();
 
   if (persist) {
@@ -390,63 +497,35 @@ let dashboard: Dashboard | undefined;
 let keychain: Keychain;
 let filePage: FilePage | undefined;
 let hostKeys: Record<string, string> = {};
-let socket: WebSocket | null = null;
-let connectionState: ConnectionState = 'idle';
-let sessionStartedAt = 0;
-let uptimeTimer: number | null = null;
-let pingTimer: number | null = null;
-let pendingHostKey: HostKeyPrompt | null = null;
-let currentTargetKey = '';
-let currentTargetLabel = '';
-let currentInitialCommand = '';
-let initialCommandSent = false;
-let decoder = new TextDecoder('utf-8');
-let resizeFrame = 0;
-let awaitingHostKeyDecision = false;
-let connectGeneration = 0;
-let authorizationAbort: AbortController | null = null;
-let currentExpectedFingerprint = '';
-let currentRememberedFingerprint = '';
-let currentSessionSubtitle: LocalizedMessage = { zh: '选择目标并连接', en: 'Choose a target and connect' };
-let currentSessionId = '';
-let currentEventMessage: LocalizedMessage = { zh: 'Worker 运行时待命', en: 'Worker runtime standing by' };
+// Rendering-only state that genuinely belongs to the page, not to a session.
 let currentFormError: LocalizedMessage | null = null;
 let passwordDirty = false;
-let pendingHistory: PendingHistory | null = null;
+let panelOpen = false;
+let terminalTools: TerminalToolsController | undefined;
 let historyPasswordLoading = false;
 let historyPasswordLoadGeneration = 0;
 let historyMutationSequence = 0;
 let keyFileReadGeneration = 0;
 let profileSaveTask: Promise<void> = Promise.resolve();
 const latestHistoryMutation = new Map<string, number>();
-let panelOpen = false;
-let fileManager: FileManager;
-let fileTree: FileTree;
-let processManager: ProcessManager;
-let terminalTools: TerminalToolsController | undefined;
-let sshReconnectManager: WebSocketReconnectManager | null = null;
-let reconnectParams: {
-  host: string; port: number; username: string; authMethod: string;
-  password?: string; privateKey?: string; keychainId?: string; keyPassphrase?: string; pinnedKey?: string;
-  term: string; encoding: string;
-} | null = null;
 
-// Network rate state. The backend sends cumulative byte counters per interface
-// per tick; we keep a per-interface baseline (counters + local clock timestamp)
-// so switching the selected interface — or the server reporting a different
-// set — never produces a bogus one-shot rate spike. `netIfaceList` is the
-// deduplicated, order-preserving list of interfaces present in the latest tick;
-// `netSelectedIface` stays null until the first tick resolves a default.
-// 60-point ring buffer of the per-tick throughput magnitude (max of rx/tx).
-// The newest sample lives at `netSparkIdx - 1`; the oldest at `netSparkIdx`
-// once the buffer wraps, or at index 0 while it is still filling.
-const NET_SPARK_POINTS = 60;
-const netSpark = new Float32Array(NET_SPARK_POINTS);
-let netSparkIdx = 0;
-let netSparkFilled = 0;
-const netBaselines = new Map<string, { rx: number; tx: number; ts: number }>();
-let netIfaceList: string[] = [];
-let netSelectedIface: string | null = null;
+// Session registry. `ctx` is whichever session is bound to the UI right now;
+// every shared widget (terminal stage aside, the event log, the status bar, the
+// resource block) answers to it and to nothing else. The other contexts stay
+// alive in the registry — each owns its socket, auxiliary channels, terminal
+// and managers — and the handlers below always capture their own session, so a
+// background connection can never write into the session being looked at.
+const sessions = new SessionManager();
+let ctx: SessionContext = sessions.create();
+
+/** True when `session` owns the shared UI, i.e. its events may repaint widgets. */
+function isFront(session: SessionContext): boolean {
+  return ctx === session;
+}
+
+// Per-connection throughput state now lives on SessionContext (one baseline map
+// and ring buffer per session, so a second connection never produces a bogus
+// one-shot rate spike). The helpers below read and write `ctx.*`.
 
 const NET_RATE_UNITS = ['B', 'KB', 'MB', 'GB'] as const;
 
@@ -473,15 +552,15 @@ function drawNetworkSparkline(): void {
   const height = Math.max(1, Math.round(cssHeight * dpr));
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  ctx.clearRect(0, 0, width, height);
-  if (netSparkFilled === 0) return;
+  const surface = canvas.getContext('2d');
+  if (!surface) return;
+  surface.clearRect(0, 0, width, height);
+  if (ctx.netSparkFilled === 0) return;
   // Build a chronological copy so the rest of the math is index-stable.
   const data = new Array<number>(NET_SPARK_POINTS).fill(0);
-  const start = netSparkFilled < NET_SPARK_POINTS ? 0 : netSparkIdx;
+  const start = ctx.netSparkFilled < NET_SPARK_POINTS ? 0 : ctx.netSparkIdx;
   for (let i = 0; i < NET_SPARK_POINTS; i += 1) {
-    data[i] = netSpark[(start + i) % NET_SPARK_POINTS];
+    data[i] = ctx.netSpark[(start + i) % NET_SPARK_POINTS];
   }
   let minimum = data[0];
   let maximum = data[0];
@@ -495,14 +574,14 @@ function drawNetworkSparkline(): void {
   const slot = width / NET_SPARK_POINTS;
   // Leave a small gap between bars; floor so a 1px slot still draws a visible bar.
   const barWidth = Math.max(1, Math.floor(slot * 0.7));
-  ctx.fillStyle = currentColorScheme() === 'light' ? '#0f7a58' : '#69e6b4';
+  surface.fillStyle = currentColorScheme() === 'light' ? '#0f7a58' : '#69e6b4';
   for (let i = 0; i < NET_SPARK_POINTS; i += 1) {
     const value = data[i];
     const normalized = (value - minimum) / span;
     const barHeight = Math.max(1, Math.round(normalized * (height - 1)));
     const x = Math.round(i * slot + ((slot - barWidth) / 2));
     const y = height - barHeight;
-    ctx.fillRect(x, y, barWidth, barHeight);
+    surface.fillRect(x, y, barWidth, barHeight);
   }
 }
 
@@ -512,11 +591,11 @@ function drawNetworkSparkline(): void {
 function syncNetworkSelectOptions(): void {
   const select = ui.resourceNetworkSelect;
   const existing = Array.from(select.options).map((option) => option.value);
-  const unchanged = existing.length === netIfaceList.length
-    && existing.every((value, index) => value === netIfaceList[index]);
+  const unchanged = existing.length === ctx.netIfaceList.length
+    && existing.every((value, index) => value === ctx.netIfaceList[index]);
   if (unchanged) return;
   select.replaceChildren();
-  for (const iface of netIfaceList) {
+  for (const iface of ctx.netIfaceList) {
     const option = document.createElement('option');
     option.value = iface;
     option.textContent = iface;
@@ -530,13 +609,13 @@ function syncNetworkSelectOptions(): void {
 // plain-text label is hidden while the select is shown).
 function updateNetworkIfaceLabel(): void {
   const select = ui.resourceNetworkSelect;
-  const multi = netIfaceList.length > 1;
-  ui.resourceNetworkIface.textContent = netSelectedIface ?? '-';
+  const multi = ctx.netIfaceList.length > 1;
+  ui.resourceNetworkIface.textContent = ctx.netSelectedIface ?? '-';
   ui.resourceNetworkIface.hidden = multi;
   select.hidden = !multi;
   if (multi) {
     syncNetworkSelectOptions();
-    select.value = netSelectedIface ?? '';
+    select.value = ctx.netSelectedIface ?? '';
   }
 }
 
@@ -544,10 +623,10 @@ function updateNetworkIfaceLabel(): void {
 // switch (manual or automatic fallback) and on full teardown; do NOT clear
 // baseline state by hand anywhere else.
 function resetNetworkBaseline(): void {
-  netBaselines.clear();
-  netSpark.fill(0);
-  netSparkIdx = 0;
-  netSparkFilled = 0;
+  ctx.netBaselines.clear();
+  ctx.netSpark.fill(0);
+  ctx.netSparkIdx = 0;
+  ctx.netSparkFilled = 0;
   drawNetworkSparkline();
   ui.resourceNetworkRateUp.textContent = `↑ ${formatNetworkRate(0)}`;
   ui.resourceNetworkRateDown.textContent = `↓ ${formatNetworkRate(0)}`;
@@ -573,26 +652,26 @@ function updateNetworkMetric(samples: NetworkSample[] | null, timestamp: number)
     seen.add(sample.iface);
     list.push(sample.iface);
   }
-  netIfaceList = list;
+  ctx.netIfaceList = list;
 
   // Resolve the selected interface: keep the user's choice while it is still
   // present, otherwise fall back to eth0 (or the first interface in order).
-  const previousSelection = netSelectedIface;
-  if (netSelectedIface === null || !netIfaceList.includes(netSelectedIface)) {
-    netSelectedIface = netIfaceList.includes('eth0') ? 'eth0' : netIfaceList[0];
+  const previousSelection = ctx.netSelectedIface;
+  if (ctx.netSelectedIface === null || !ctx.netIfaceList.includes(ctx.netSelectedIface)) {
+    ctx.netSelectedIface = ctx.netIfaceList.includes('eth0') ? 'eth0' : ctx.netIfaceList[0];
   }
-  if (netSelectedIface !== previousSelection) {
+  if (ctx.netSelectedIface !== previousSelection) {
     // Interface changed (user switch or automatic fallback): a fresh baseline
     // prevents a bogus one-shot rate spike across different counters.
     resetNetworkBaseline();
   }
 
   // Prune baselines for interfaces that disappeared (e.g. cable unplugged).
-  for (const iface of netBaselines.keys()) {
-    if (!netIfaceList.includes(iface)) netBaselines.delete(iface);
+  for (const iface of ctx.netBaselines.keys()) {
+    if (!ctx.netIfaceList.includes(iface)) ctx.netBaselines.delete(iface);
   }
 
-  const selected = netSelectedIface;
+  const selected = ctx.netSelectedIface;
   const sample = samples.find((entry) => entry.iface === selected);
   if (!sample) {
     // The selected interface is absent from this tick (mid-switch); keep the
@@ -600,12 +679,12 @@ function updateNetworkMetric(samples: NetworkSample[] | null, timestamp: number)
     return;
   }
 
-  const baseline = netBaselines.get(selected);
+  const baseline = ctx.netBaselines.get(selected);
   if (!baseline) {
     // First sample for the selected interface: stash the counters and
     // timestamp; rate and sparkline both show zero until we have a second
     // sample to diff against.
-    netBaselines.set(selected, { rx: sample.rxBytes, tx: sample.txBytes, ts: timestamp });
+    ctx.netBaselines.set(selected, { rx: sample.rxBytes, tx: sample.txBytes, ts: timestamp });
     drawNetworkSparkline();
     ui.resourceNetworkRateUp.textContent = `↑ ${formatNetworkRate(0)}`;
     ui.resourceNetworkRateDown.textContent = `↓ ${formatNetworkRate(0)}`;
@@ -621,13 +700,13 @@ function updateNetworkMetric(samples: NetworkSample[] | null, timestamp: number)
   const deltaTx = Math.max(0, sample.txBytes - baseline.tx);
   const rxRate = deltaRx / deltaSeconds;
   const txRate = deltaTx / deltaSeconds;
-  netBaselines.set(selected, { rx: sample.rxBytes, tx: sample.txBytes, ts: timestamp });
+  ctx.netBaselines.set(selected, { rx: sample.rxBytes, tx: sample.txBytes, ts: timestamp });
   // Use the larger of the two rates as the sparkline magnitude so a
   // quiescent direction doesn't make the chart look half-dead.
   const magnitude = Math.max(rxRate, txRate);
-  netSpark[netSparkIdx] = magnitude;
-  netSparkIdx = (netSparkIdx + 1) % NET_SPARK_POINTS;
-  if (netSparkFilled < NET_SPARK_POINTS) netSparkFilled += 1;
+  ctx.netSpark[ctx.netSparkIdx] = magnitude;
+  ctx.netSparkIdx = (ctx.netSparkIdx + 1) % NET_SPARK_POINTS;
+  if (ctx.netSparkFilled < NET_SPARK_POINTS) ctx.netSparkFilled += 1;
   drawNetworkSparkline();
   // `↑` = upload (tx), `↓` = download (rx) — match the toolbar arrow convention.
   ui.resourceNetworkRateUp.textContent = `↑ ${formatNetworkRate(txRate)}`;
@@ -638,11 +717,11 @@ function updateNetworkMetric(samples: NetworkSample[] | null, timestamp: number)
 function resetNetworkMetric(): void {
   // Idempotent: only touch the DOM / state if the block is currently visible
   // or still carries live state, so repeated resets (one per
-  // processManager.reset() call site) are cheap.
-  if (ui.resourceNetwork.hidden && netSelectedIface === null && netBaselines.size === 0) return;
+  // ctx.processManager.reset() call site) are cheap.
+  if (ui.resourceNetwork.hidden && ctx.netSelectedIface === null && ctx.netBaselines.size === 0) return;
   ui.resourceNetwork.hidden = true;
-  netIfaceList = [];
-  netSelectedIface = null;
+  ctx.netIfaceList = [];
+  ctx.netSelectedIface = null;
   const select = ui.resourceNetworkSelect;
   select.replaceChildren();
   select.hidden = true;
@@ -654,52 +733,98 @@ function resetNetworkMetric(): void {
   resetNetworkBaseline();
 }
 
-const terminal = new Terminal({
-  allowProposedApi: false,
-  convertEol: false,
-  cursorBlink: true,
-  cursorStyle: 'block',
-  fontFamily: 'Cascadia Code, SFMono-Regular, Consolas, Liberation Mono, monospace',
-  fontSize: 13,
-  lineHeight: 1.18,
-  letterSpacing: 0,
-  scrollback: 10_000,
-  tabStopWidth: 8,
-  theme: terminalTheme(),
-});
-const fitAddon = new FitAddon();
-terminal.loadAddon(fitAddon);
-terminal.loadAddon(new WebLinksAddon());
-terminal.open(ui.terminalElement);
+// Terminal + auxiliary channels belong to the session, so every context gets
+// its own set here. The xterm host lives in `#terminal-stage` and is created per
+// session by `mountTerminal()`; the panel managers stay inert until
+// `mountSessionPanels()` publishes them, which is what lets several sessions
+// share one panel DOM without seeing each other's rows.
+function attachSessionRuntime(session: SessionContext): void {
+  session.terminal = new Terminal({
+    allowProposedApi: false,
+    convertEol: false,
+    cursorBlink: true,
+    cursorStyle: 'block',
+    fontFamily: 'Cascadia Code, SFMono-Regular, Consolas, Liberation Mono, monospace',
+    fontSize: 13,
+    lineHeight: 1.18,
+    letterSpacing: 0,
+    scrollback: 10_000,
+    tabStopWidth: 8,
+    theme: terminalTheme(),
+  });
+  session.fitAddon = new FitAddon();
+  session.terminal.loadAddon(session.fitAddon);
+  session.terminal.loadAddon(new WebLinksAddon());
+  session.terminal.onData((data) => terminalTools?.handleTerminalData(data));
+  // Open against the session's own host instead of a page-wide `#terminal` node,
+  // so a second session can get a sibling host inside the same stage.
+  mountTerminal(session);
+  // The callbacks below feed widgets owned by whoever is in front, so a
+  // background session's SFTP/status chatter never reaches them.
+  session.fileManager = new FileManager({
+    elements: collectFileManagerElements(),
+    getLanguage: () => currentLanguage,
+    onError: (message) => { if (isFront(session)) event(message, 'sftp', true); },
+    onStatus: (message) => { if (isFront(session)) event(message, 'sftp'); },
+  });
+  session.fileTree = new FileTree({
+    container: ui.fileTree,
+    fetchEntries: (path) => session.fileManager.fetchDirectoryEntries(path),
+    getLanguage: () => currentLanguage,
+    onNavigate: (path) => session.fileManager.navigate(path),
+    onError: (message) => { if (isFront(session)) event(message, 'sftp', true); },
+    initialRoot: '/',
+  });
+  session.fileManager.onCwdChange((cwd) => session.fileTree.setCwd(cwd));
+  session.processManager = new ProcessManager({
+    elements: collectProcessManagerElements(),
+    getLanguage: () => currentLanguage,
+    onError: (message) => { if (isFront(session)) event(message, 'process', true); },
+    onReconnect: (zh, en) => { if (isFront(session)) event(bilingual(zh, en), 'process'); },
+    onToast: (zh, en, kind) => { if (isFront(session)) toast(bilingual(zh, en), kind); },
+    // One throughput graph on screen: only the visible session feeds it.
+    onNetworkSample: (sample, timestamp) => { if (isFront(session)) updateNetworkMetric(sample, timestamp); },
+  });
+}
+
+/** Fresh registry entry plus everything that lives per connection. */
+function createSession(): SessionContext {
+  const session = sessions.create();
+  attachSessionRuntime(session);
+  return session;
+}
+
+/**
+ * The registry always keeps one empty placeholder alive so the workspace has a
+ * terminal to write into. Adopting an existing connection has to grow it around
+ * that placeholder rather than adding a second entry — otherwise one shell is
+ * drawn as two tabs, one of them empty.
+ */
+function claimPlaceholderSession(): SessionContext {
+  const placeholder = sessions
+    .all()
+    .find((candidate) => candidate.state === 'idle' && !candidate.socket && !candidate.backendSessionId);
+  return placeholder ?? createSession();
+}
+
+attachSessionRuntime(ctx);
 terminalTools = createTerminalTools({
   send: sendTerminalData,
-  focusTerminal: () => terminal.focus(),
+  focusTerminal: () => ctx.terminal.focus(),
   refitTerminal: () => fitTerminal(true),
   localize: bilingual,
 });
-fileManager = new FileManager({
-  elements: collectFileManagerElements(),
-  getLanguage: () => currentLanguage,
-  onError: (message) => event(message, 'sftp', true),
-  onStatus: (message) => event(message, 'sftp'),
-});
-fileTree = new FileTree({
-  container: ui.fileTree,
-  fetchEntries: (path) => fileManager.fetchDirectoryEntries(path),
-  getLanguage: () => currentLanguage,
-  onNavigate: (path) => fileManager.navigate(path),
-  onError: (message) => event(message, 'sftp', true),
-  initialRoot: '/',
-});
-fileManager.onCwdChange((cwd) => fileTree.setCwd(cwd));
-processManager = new ProcessManager({
-  elements: collectProcessManagerElements(),
-  getLanguage: () => currentLanguage,
-  onError: (message) => event(message, 'process', true),
-  onReconnect: (zh, en) => event(bilingual(zh, en), 'process'),
-  onToast: (zh, en, kind) => toast(bilingual(zh, en), kind),
-  onNetworkSample: (sample, timestamp) => updateNetworkMetric(sample, timestamp),
-});
+// Every session's panels start unmounted; whichever one is in front claims them.
+mountSessionPanels(ctx);
+// Registry changes that happen outside the connect flow — a retired tab, a
+// dashboard action later on — still have to reach every session surface.
+window.addEventListener(SESSION_EVENT, () => refreshSessionSurfaces());
+
+/** Tab strip plus the file page picker: both list the live sessions. */
+function refreshSessionSurfaces(): void {
+  renderSessionTabs();
+  filePage?.refreshSessions();
+}
 
 type ColorScheme = 'dark' | 'light';
 
@@ -707,7 +832,7 @@ function currentColorScheme(): ColorScheme {
   return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
 }
 
-// Declared as function bodies (not module-level consts) because `terminal` is
+// Declared as function bodies (not module-level consts) because `ctx.terminal` is
 // constructed above and reads this palette during module evaluation.
 function terminalTheme(scheme: ColorScheme = currentColorScheme()): Record<string, string> {
   if (scheme === 'light') {
@@ -761,7 +886,7 @@ function terminalTheme(scheme: ColorScheme = currentColorScheme()): Record<strin
 }
 
 function applyTerminalTheme(): void {
-  terminal.options.theme = terminalTheme();
+  ctx.terminal.options.theme = terminalTheme();
   drawNetworkSparkline();
 }
 
@@ -827,7 +952,7 @@ function cancelHistoryPasswordLoad(): void {
   if (!historyPasswordLoading) return;
   historyPasswordLoadGeneration++;
   historyPasswordLoading = false;
-  setState(connectionState);
+  setState(ctx.state);
 }
 
 function resetPasswordField(): void {
@@ -861,17 +986,15 @@ function invalidateHistoryPasswordLoad(): void {
 }
 
 function normalizeHost(host: string): string {
-  const trimmed = host.trim();
-  if (trimmed.startsWith('[') && trimmed.endsWith(']')) return trimmed.slice(1, -1);
-  return trimmed;
+  return normalizeHostAddress(host);
 }
 
 function targetKey(host = normalizeHost(ui.host.value), port = Number(ui.port.value), username = ui.username.value.trim()): string {
-  return historyKey(host, port, username);
+  return sessionTargetKey(host, port, username);
 }
 
 function targetLabel(host: string, port: number, username: string): string {
-  return historyLabel(host, port, username);
+  return sessionTargetLabel(host, port, username);
 }
 
 function applyFormDefaults(): void {
@@ -966,7 +1089,7 @@ async function applyProfile(profile: SavedProfile): Promise<void> {
   }
   passwordDirty = false;
   historyPasswordLoading = true;
-  setState(connectionState);
+  setState(ctx.state);
   renderProfiles();
   let credentials: Credentials;
   try {
@@ -974,7 +1097,7 @@ async function applyProfile(profile: SavedProfile): Promise<void> {
   } catch (error) {
     if (loadGeneration === historyPasswordLoadGeneration) {
       historyPasswordLoading = false;
-      setState(connectionState);
+      setState(ctx.state);
     }
     throw error;
   }
@@ -991,7 +1114,7 @@ async function applyProfile(profile: SavedProfile): Promise<void> {
     // 漏掉这一项时加密私钥能保存也能「连接测试」通过，正式进终端却报「私钥已加密，请提供口令」。
     ui.keyPassphrase.value = credentials.keyPassphrase ?? '';
   }
-  setState(connectionState);
+  setState(ctx.state);
 }
 
 function clearForm(): void {
@@ -1008,15 +1131,15 @@ function clearForm(): void {
   ui.formError.hidden = true;
   currentFormError = null;
   setAuthMethod('password');
-  setState(connectionState);
+  setState(ctx.state);
   renderProfiles();
   ui.host.focus();
 }
 
 async function saveConnectedProfile(): Promise<void> {
-  if (!pendingHistory || pendingHistory.generation !== connectGeneration) return;
-  const operation = pendingHistory;
-  pendingHistory = null;
+  if (!ctx.pendingHistory || ctx.pendingHistory.generation !== ctx.generation) return;
+  const operation = ctx.pendingHistory;
+  ctx.pendingHistory = null;
   const connectedAt = Date.now();
   const mutation = ++historyMutationSequence;
   latestHistoryMutation.set(operation.target, mutation);
@@ -1028,8 +1151,8 @@ async function saveConnectedProfile(): Promise<void> {
   }
   if (passwordContext(profile) !== operation.target || latestHistoryMutation.get(operation.target) !== mutation) return;
   const key = targetKey(profile.host, profile.port, profile.username);
-  const rememberedFingerprint = key === currentTargetKey && currentRememberedFingerprint
-    ? currentRememberedFingerprint
+  const rememberedFingerprint = key === ctx.targetKey && ctx.rememberedFingerprint
+    ? ctx.rememberedFingerprint
     : hostKeys[key] || profile.fingerprint || '';
   const saved: SavedProfile = {
     ...profile,
@@ -1039,7 +1162,7 @@ async function saveConnectedProfile(): Promise<void> {
   if (historyPasswordLoading && targetKey() === operation.target) {
     historyPasswordLoadGeneration++;
     historyPasswordLoading = false;
-    setState(connectionState);
+    setState(ctx.state);
   }
   const result = await persistHistoryMutation({ kind: 'upsert', profile: saved });
   if (!result.persisted) {
@@ -1070,6 +1193,8 @@ async function deleteProfile(id: string): Promise<void> {
 
 function renderProfiles(): void {
   dashboard?.setHosts(profiles);
+  // 名称和国旗来自主机列表，它可能比连接本身晚一步到达，所以每次重画都带上顶栏。
+  renderSessionHeader();
   ui.profileList.replaceChildren();
   ui.profileCount.textContent = String(profiles.length);
   if (profiles.length === 0) {
@@ -1189,30 +1314,13 @@ function toast(message: string, kind: 'info' | 'error' = 'info'): void {
  * host's session, so link state and form target must be checked together.
  */
 function sessionOwnsFormTarget(): boolean {
-  if (connectionState !== 'connecting' && connectionState !== 'connected' && connectionState !== 'disconnecting') return false;
-  return currentTargetKey !== '' && currentTargetKey === targetKey();
-}
-
-/** Wait until a requested disconnect has settled back to idle. */
-function waitForIdle(timeoutMs = 2_000): Promise<void> {
-  return new Promise((resolve) => {
-    if (connectionState === 'idle' || connectionState === 'error') {
-      resolve();
-      return;
-    }
-    const startedAt = Date.now();
-    const timer = window.setInterval(() => {
-      if (connectionState === 'idle' || connectionState === 'error' || Date.now() - startedAt >= timeoutMs) {
-        window.clearInterval(timer);
-        resolve();
-      }
-    }, 40);
-  });
+  if (ctx.state !== 'connecting' && ctx.state !== 'connected' && ctx.state !== 'disconnecting') return false;
+  return ctx.targetKey !== '' && ctx.targetKey === targetKey();
 }
 
 /** Paint the connect button for the host currently held by the form. */
 function renderConnectControl(): void {
-  const state: ConnectionState = sessionOwnsFormTarget() ? connectionState : 'idle';
+  const state: ConnectionState = sessionOwnsFormTarget() ? ctx.state : 'idle';
   const control = resolveConnectionControl(state, historyPasswordLoading);
   const controlLabel = control.action === 'cancel'
     ? bilingual('取消连接', 'Cancel connection')
@@ -1227,42 +1335,51 @@ function renderConnectControl(): void {
   ui.connect.querySelector<HTMLElement>('.button-icon')!.textContent = control.danger ? 'x' : '>_';
   ui.connect.querySelector<HTMLElement>('span:last-child')!.textContent = controlLabel;
   ui.connect.setAttribute('aria-label', controlLabel);
-  ui.connect.title = currentSessionId || controlLabel;
+  ui.connect.title = ctx.backendSessionId || controlLabel;
 }
 
 function updateConnectionStatus(message: LocalizedMessage): void {
-  currentSessionSubtitle = message;
+  ctx.subtitle = message;
   const text = localize(message);
   ui.sessionSubtitle.textContent = text;
   filePage?.setMessage(text);
-  if (connectionState === 'connecting' && sessionOwnsFormTarget()) {
+  if (ctx.state === 'connecting' && sessionOwnsFormTarget()) {
     const btnSpan = ui.connect.querySelector<HTMLElement>('span:last-child');
     if (btnSpan) btnSpan.textContent = text;
   }
 }
 
+/**
+ * Move one session to a new state. Only the front session repaints widgets;
+ * everyone else just keeps its own summary (tab strip, dashboard badge) honest.
+ */
+function setSessionState(session: SessionContext, state: ConnectionState, label?: string): void {
+  session.state = state;
+  sessions.touch(session.id);
+  // "What can the next page load ask the server for" is exactly "what is
+  // connected right now", and this is the only place that answer changes.
+  saveRestorableSessions(sessions.all());
+  if (isFront(session)) setState(state, label);
+  else renderSessionTabs();
+}
+
 function setState(state: ConnectionState, label?: string): void {
-  connectionState = state;
+  ctx.state = state;
   ui.fullscreenFiles.disabled = state !== 'connected';
-  filePage?.setConnection(state, profiles.find((profile) => passwordContext(profile) === currentTargetKey)?.id, currentTargetLabel);
-  const stateLabel = label ?? ({
-    idle: bilingual('离线', 'Offline'),
-    connecting: bilingual('连接中', 'Connecting'),
-    connected: bilingual('在线', 'Online'),
-    disconnecting: bilingual('正在断开', 'Disconnecting'),
-    error: bilingual('错误', 'Error'),
-  } satisfies Record<ConnectionState, string>)[state];
+  filePage?.setConnection(state, profiles.find((profile) => passwordContext(profile) === ctx.targetKey)?.id, ctx.targetLabel);
+  const stateLabel = label ?? localize(SESSION_STATE_LABEL[state]);
   ui.liveOrb.className = `live-orb ${state}`;
   ui.liveOrbLabel.textContent = stateLabel;
   ui.liveOrb.title = stateLabel;
   renderConnectControl();
+  renderSessionTabs();
   terminalTools?.setConnected(state === 'connected');
 }
 
 function event(message: string, category = 'session', error = false, alternate?: string): void {
   const eventTranslation = messageTranslation(message, alternate);
-  currentEventMessage = eventTranslation;
-  ui.eventMessage.textContent = localize(currentEventMessage);
+  ctx.eventMessage = eventTranslation;
+  ui.eventMessage.textContent = localize(ctx.eventMessage);
   const line = document.createElement('div');
   line.className = `event-line${error ? ' error' : ''}`;
   line.dataset.category = category;
@@ -1274,6 +1391,13 @@ function event(message: string, category = 'session', error = false, alternate?:
   copy.textContent = message;
   copy.dataset.messageZh = eventTranslation.zh;
   copy.dataset.messageEn = eventTranslation.en;
+  // With several shells open the log mixes sessions: label whose it is.
+  if (sessions.list().length > 1) {
+    const tag = document.createElement('b');
+    tag.className = 'event-session';
+    tag.textContent = ctx.targetLabel;
+    copy.prepend(tag);
+  }
   line.append(time, type, copy);
   ui.eventLog.append(line);
   while (ui.eventLog.childElementCount > 100) ui.eventLog.firstElementChild?.remove();
@@ -1281,18 +1405,18 @@ function event(message: string, category = 'session', error = false, alternate?:
 }
 
 function fitTerminal(send = true): void {
-  cancelAnimationFrame(resizeFrame);
-  resizeFrame = requestAnimationFrame(() => {
+  cancelAnimationFrame(ctx.resizeFrame);
+  ctx.resizeFrame = requestAnimationFrame(() => {
     try {
-      fitAddon.fit();
+      ctx.fitAddon.fit();
       // 握手完成前不能发 resize：此时服务端还没有会话，任何非 connect 消息都会被判成重复
       // 连接，进而把正在进行的握手一起掐断。进入终端必然会触发 ResizeObserver（布局变化），
       // 所以这个时序很容易命中；真实尺寸在 markReady 里补发一次。
-      if (send && connectionState === 'connected' && socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'resize', cols: terminal.cols, rows: terminal.rows }));
+      if (send && ctx.state === 'connected' && ctx.socket?.readyState === WebSocket.OPEN) {
+        ctx.socket.send(JSON.stringify({ type: 'resize', cols: ctx.terminal.cols, rows: ctx.terminal.rows }));
       }
     } catch {
-      // The terminal can be temporarily dimensionless during a panel drawer transition.
+      // The ctx.terminal can be temporarily dimensionless during a panel drawer transition.
     }
   });
 }
@@ -1300,7 +1424,7 @@ function fitTerminal(send = true): void {
 function setPanelOpen(open: boolean): void {
   const view = resolveConnectionPanel(open);
   panelOpen = view.expanded;
-  if (!view.expanded && (connectionState === 'connecting' || connectionState === 'connected' || connectionState === 'disconnecting')) {
+  if (!view.expanded && (ctx.state === 'connecting' || ctx.state === 'connected' || ctx.state === 'disconnecting')) {
     invalidateHistoryPasswordLoad();
   }
   if (!view.expanded && ui.panel.contains(document.activeElement)) ui.panelToggle.focus();
@@ -1318,11 +1442,11 @@ function setPanelOpen(open: boolean): void {
 }
 
 function updateUptime(): void {
-  if (!sessionStartedAt) {
+  if (!ctx.startedAt) {
     ui.metricUptime.textContent = '00:00';
     return;
   }
-  const seconds = Math.max(0, Math.floor((Date.now() - sessionStartedAt) / 1000));
+  const seconds = Math.max(0, Math.floor((Date.now() - ctx.startedAt) / 1000));
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const remainder = seconds % 60;
@@ -1331,66 +1455,73 @@ function updateUptime(): void {
     : `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
 }
 
-function startTimers(): void {
-  stopTimers();
-  sessionStartedAt = Date.now();
-  updateUptime();
-  uptimeTimer = window.setInterval(updateUptime, 1_000);
-  pingTimer = window.setInterval(() => {
-    if (socket?.readyState !== WebSocket.OPEN) return;
-    socket.send(JSON.stringify({ type: 'ping' }));
+function startTimers(session: SessionContext): void {
+  stopTimers(session);
+  session.startedAt = Date.now();
+  // Ping every session so idle background shells stay alive; only the front one
+  // paints the uptime readout, whose single widget answers to `ctx`.
+  session.uptimeTimer = window.setInterval(() => {
+    if (isFront(session)) updateUptime();
+  }, 1_000);
+  session.pingTimer = window.setInterval(() => {
+    if (session.socket?.readyState !== WebSocket.OPEN) return;
+    session.socket.send(JSON.stringify({ type: 'ping' }));
   }, PING_INTERVAL_MS);
+  if (isFront(session)) updateUptime();
 }
 
-function stopTimers(): void {
-  if (uptimeTimer !== null) window.clearInterval(uptimeTimer);
-  if (pingTimer !== null) window.clearInterval(pingTimer);
-  uptimeTimer = null;
-  pingTimer = null;
-  sessionStartedAt = 0;
+function stopTimers(session: SessionContext): void {
+  if (session.uptimeTimer !== null) window.clearInterval(session.uptimeTimer);
+  if (session.pingTimer !== null) window.clearInterval(session.pingTimer);
+  session.uptimeTimer = null;
+  session.pingTimer = null;
+  session.startedAt = 0;
 }
 
-function markReady(message = bilingual('交互式 Shell 已就绪', 'Interactive shell ready')): void {
-  if (connectionState === 'connected') return;
+function markReady(session: SessionContext, message = bilingual('交互式 Shell 已就绪', 'Interactive shell ready')): void {
+  if (session.state === 'connected') return;
+  setSessionState(session, 'connected');
+  startTimers(session);
+  if (session.initialCommand && !session.initialCommandSent) {
+    session.initialCommandSent = true;
+    const command = session.initialCommand;
+    const activeSocket = session.socket;
+    const generation = session.generation;
+    window.setTimeout(() => {
+      if (session.socket !== activeSocket || generation !== session.generation) return;
+      if (activeSocket?.readyState === WebSocket.OPEN) activeSocket.send(JSON.stringify({ type: 'input', data: `${command}\r` }));
+    }, 120);
+  }
+  // Everything below owns a widget, so a session reconnecting in the background
+  // stops here — it is already connected and must not repaint someone else's UI.
+  if (!isFront(session)) return;
   invalidateHistoryPasswordLoad();
-  setState('connected');
   setPanelOpen(false);
   profileSaveTask = saveConnectedProfile().catch(() => {
     toast(bilingual('连接成功，但无法更新历史记录。', 'Connected, but the history could not be updated.'), 'error');
   });
-  startTimers();
   updateConnectionStatus(messageTranslation(message));
   filePage?.setMessage('');
   event(message, 'ready');
-  if (currentInitialCommand && !initialCommandSent) {
-    initialCommandSent = true;
-    const command = currentInitialCommand;
-    const activeSocket = socket;
-    const generation = connectGeneration;
-    window.setTimeout(() => {
-      if (socket !== activeSocket || generation !== connectGeneration) return;
-      sendTerminalData(`${command}\r`);
-    }, 120);
-  }
-  if (document.body.dataset.view === 'workspace') terminal.focus();
+  if (document.body.dataset.view === 'workspace') session.terminal.focus();
   // 补发真实尺寸：握手期间因为布局变化产生的 resize 都被抑制了，这里对齐一次。
   requestAnimationFrame(() => fitTerminal(true));
 }
 
 function sendHostKeyDecision(accept: boolean): void {
-  if (!awaitingHostKeyDecision || !pendingHostKey || socket?.readyState !== WebSocket.OPEN) return;
-  const hostKey = pendingHostKey;
-  awaitingHostKeyDecision = false;
-  pendingHostKey = null;
-  socket.send(JSON.stringify({
+  if (!ctx.awaitingHostKeyDecision || !ctx.pendingHostKey || ctx.socket?.readyState !== WebSocket.OPEN) return;
+  const hostKey = ctx.pendingHostKey;
+  ctx.awaitingHostKeyDecision = false;
+  ctx.pendingHostKey = null;
+  ctx.socket.send(JSON.stringify({
     type: 'host_key_decision',
     accept,
     fingerprint: hostKey.fingerprint,
   }));
-  if (accept && ui.rememberHostKey.checked && currentTargetKey) {
-    currentRememberedFingerprint = hostKey.fingerprint;
-    void replaceRememberedHostKey(currentTargetKey, hostKey.fingerprint);
-    if (targetKey() === currentTargetKey) ui.fingerprint.value = hostKey.fingerprint;
+  if (accept && ui.rememberHostKey.checked && ctx.targetKey) {
+    ctx.rememberedFingerprint = hostKey.fingerprint;
+    void replaceRememberedHostKey(ctx.targetKey, hostKey.fingerprint);
+    if (targetKey() === ctx.targetKey) ui.fingerprint.value = hostKey.fingerprint;
   }
   event(accept
     ? hostKey.trust === 'changed'
@@ -1469,145 +1600,188 @@ function configureHostKeyDialog(hostKey: HostKeyPrompt): void {
     : bilingual('信任并继续', 'Trust & continue');
 }
 
+let suppressHostKeyDialogClose = false;
+
 function clearHostKeyPrompt(): void {
-  awaitingHostKeyDecision = false;
-  pendingHostKey = null;
+  ctx.awaitingHostKeyDecision = false;
+  ctx.pendingHostKey = null;
   if (ui.hostKeyDialog.open) ui.hostKeyDialog.close('reject');
   ui.hostKeyDialog.returnValue = '';
 }
 
-function handleServerMessage(message: ServerMessage): void {
+/**
+ * Collapses the prompt without answering it. Returning to the host overview
+ * must not reject a host key on the user's behalf — the session stays paused
+ * and the same prompt is re-shown when they come back.
+ */
+function hideHostKeyPrompt(): void {
+  if (!ui.hostKeyDialog.open) return;
+  suppressHostKeyDialogClose = true;
+  ui.hostKeyDialog.close();
+}
+
+/**
+ * Publishes a host-key confirmation request owned by the active session.
+ * Extracted from `handleServerMessage` so the same prompt can be re-rendered
+ * after the user visits the dashboard and returns.
+ */
+function showHostKeyPrompt(hostKey: HostKeyPrompt): void {
+  ctx.pendingHostKey = hostKey;
+  ctx.awaitingHostKeyDecision = true;
+  renderHostKeyPrompt(hostKey);
+  event(hostKey.trust === 'changed'
+    ? bilingual(`认证已暂停：主机密钥从 ${hostKey.expectedFingerprint} 变为 ${hostKey.fingerprint}`, `Authentication paused: host key changed from ${hostKey.expectedFingerprint} to ${hostKey.fingerprint}`)
+    : bilingual(`认证已暂停，请确认首次见到的主机密钥 ${hostKey.fingerprint}`, `Authentication paused for first-seen host key ${hostKey.fingerprint}`), 'host-key', hostKey.trust === 'changed');
+}
+
+/** Re-renders the dialog body from a persisted prompt, without re-logging it. */
+function renderHostKeyPrompt(hostKey: HostKeyPrompt): void {
+  configureHostKeyDialog(hostKey);
+  ui.hostKeyTarget.textContent = ui.sessionTitle.textContent ?? ctx.targetKey;
+  ui.hostKeyType.textContent = hostKey.keyType;
+  ui.hostKeyFingerprint.textContent = hostKey.fingerprint;
+  ui.rememberHostKey.checked = true;
+  if (!ui.hostKeyDialog.open) {
+    ui.hostKeyDialog.returnValue = '';
+    ui.hostKeyDialog.showModal();
+  }
+}
+
+/** Brings a still-pending prompt back after the workspace is re-entered. */
+function restoreHostKeyPrompt(): void {
+  if (!ctx.awaitingHostKeyDecision || !ctx.pendingHostKey) return;
+  renderHostKeyPrompt(ctx.pendingHostKey);
+}
+
+function handleServerMessage(session: SessionContext, message: ServerMessage): void {
   const type = message.type ?? 'status';
+  // Every widget below belongs to the front session, so a session reconnecting
+  // in the background updates its own channels and stays silent here.
+  const say: typeof event = isFront(session) ? event : () => undefined;
+  const report: typeof updateConnectionStatus = isFront(session) ? updateConnectionStatus : () => undefined;
   if (type === 'system_info') {
     const system = readServerSystemInfo(message.system);
     if (!system) {
-      event(bilingual('收到无效的系统探测结果。', 'Received an invalid system probe result.'), 'protocol', true);
+      say(bilingual('收到无效的系统探测结果。', 'Received an invalid system probe result.'), 'protocol', true);
       return;
     }
     const label = [system.name, system.version, system.architecture].filter(Boolean).join(' · ');
-    event(bilingual(`已探测操作系统：${label}`, `Detected operating system: ${label}`), 'system');
-    void persistDetectedSystem(currentTargetKey, system);
+    say(bilingual(`已探测操作系统：${label}`, `Detected operating system: ${label}`), 'system');
+    void persistDetectedSystem(session.targetKey, system);
     return;
   }
   if (type === 'sftp_attach') {
     if (typeof message.url !== 'string' || !message.url.startsWith('/api/sftp?')) {
-      event(bilingual('收到无效的文件管理连接信息。', 'Received invalid file-management connection details.'), 'protocol', true);
+      say(bilingual('收到无效的文件管理连接信息。', 'Received invalid file-management connection details.'), 'protocol', true);
       return;
     }
     try {
-      fileManager.attach(message.url);
+      session.fileManager.attach(message.url);
     } catch {
-      event(bilingual('无法打开文件管理连接。', 'Could not open the file-management connection.'), 'sftp', true);
+      say(bilingual('无法打开文件管理连接。', 'Could not open the file-management connection.'), 'sftp', true);
       return;
     }
-    fileTree.setReady(true);
-    event(bilingual('文件管理通道已可用。', 'File management channel is available.'), 'sftp');
+    session.fileTree.setReady(true);
+    say(bilingual('文件管理通道已可用。', 'File management channel is available.'), 'sftp');
     return;
   }
   if (type === 'process_attach') {
     if (typeof message.url !== 'string' || !message.url.startsWith('/api/processes?')) {
-      event(bilingual('收到无效的进程监控连接信息。', 'Received invalid process-monitor connection details.'), 'protocol', true);
+      say(bilingual('收到无效的进程监控连接信息。', 'Received invalid process-monitor connection details.'), 'protocol', true);
       return;
     }
     try {
-      processManager.attach(message.url);
+      session.processManager.attach(message.url);
     } catch {
-      event(bilingual('无法打开进程监控连接。', 'Could not open the process-monitor connection.'), 'process', true);
+      say(bilingual('无法打开进程监控连接。', 'Could not open the process-monitor connection.'), 'process', true);
       return;
     }
-    event(bilingual('进程监控通道已可用。', 'Process monitor channel is available.'), 'process');
+    say(bilingual('进程监控通道已可用。', 'Process monitor channel is available.'), 'process');
     return;
   }
   if (type === 'host_key') {
     const fingerprint = message.fingerprint ?? '';
     const keyType = message.keyType ?? '';
-    const expected = message.expectedFingerprint ?? currentExpectedFingerprint;
+    const expected = message.expectedFingerprint ?? session.expectedFingerprint;
     if (!SSH_FINGERPRINT_RE.test(fingerprint)
       || !/^[A-Za-z0-9@._+-]{1,128}$/.test(keyType)
       || typeof message.trusted !== 'boolean'
       || (expected !== '' && !SSH_FINGERPRINT_RE.test(expected))
-      || (message.expectedFingerprint !== undefined && message.expectedFingerprint !== currentExpectedFingerprint)) {
-      event(bilingual('收到无效的主机密钥消息。', 'Received an invalid host key message.'), 'protocol', true);
-      socket?.close(CLIENT_CLOSE_PROTOCOL_ERROR, 'Invalid host key message');
+      || (message.expectedFingerprint !== undefined && message.expectedFingerprint !== session.expectedFingerprint)) {
+      say(bilingual('收到无效的主机密钥消息。', 'Received an invalid host key message.'), 'protocol', true);
+      session.socket?.close(CLIENT_CLOSE_PROTOCOL_ERROR, 'Invalid host key message');
       return;
     }
-    ui.metricHostKey.textContent = keyType.replace('ssh-', '').replace('ecdsa-sha2-', '');
-    ui.metricHostKey.title = fingerprint;
+    if (isFront(session)) {
+      ui.metricHostKey.textContent = keyType.replace('ssh-', '').replace('ecdsa-sha2-', '');
+      ui.metricHostKey.title = fingerprint;
+    }
     const trust = classifyHostKey(expected, fingerprint);
     if (message.trusted !== (trust === 'matched')) {
-      event(bilingual('收到不一致的主机密钥信任消息。', 'Received an inconsistent trusted host key message.'), 'protocol', true);
-      socket?.close(CLIENT_CLOSE_PROTOCOL_ERROR, 'Invalid trusted host key message');
+      say(bilingual('收到不一致的主机密钥信任消息。', 'Received an inconsistent trusted host key message.'), 'protocol', true);
+      session.socket?.close(CLIENT_CLOSE_PROTOCOL_ERROR, 'Invalid trusted host key message');
       return;
     }
     if (trust === 'matched') {
-      event(bilingual('已固定的主机密钥匹配。', 'Pinned host key matched.'), 'host-key');
+      say(bilingual('已固定的主机密钥匹配。', 'Pinned host key matched.'), 'host-key');
       return;
     }
-    pendingHostKey = { fingerprint, keyType, expectedFingerprint: expected, trust };
-    awaitingHostKeyDecision = true;
-    configureHostKeyDialog(pendingHostKey);
-    ui.hostKeyTarget.textContent = ui.sessionTitle.textContent ?? currentTargetKey;
-    ui.hostKeyType.textContent = keyType;
-    ui.hostKeyFingerprint.textContent = fingerprint;
-    ui.rememberHostKey.checked = true;
-    event(trust === 'changed'
-      ? bilingual(`认证已暂停：主机密钥从 ${expected} 变为 ${fingerprint}`, `Authentication paused: host key changed from ${expected} to ${fingerprint}`)
-      : bilingual(`认证已暂停，请确认首次见到的主机密钥 ${fingerprint}`, `Authentication paused for first-seen host key ${fingerprint}`), 'host-key', trust === 'changed');
-    if (!ui.hostKeyDialog.open) {
-      ui.hostKeyDialog.returnValue = '';
-      ui.hostKeyDialog.showModal();
-    }
+    // A trust question can only be answered by the session the user can see.
+    if (isFront(session)) showHostKeyPrompt({ fingerprint, keyType, expectedFingerprint: expected, trust });
     return;
   }
   if (type === 'ready') {
-    markReady(bilingualServerMessage(message.message, message.event ?? 'ready', 'Interactive shell ready'));
+    markReady(session, bilingualServerMessage(message.message, message.event ?? 'ready', 'Interactive shell ready'));
     return;
   }
   if (type === 'error') {
     const text = bilingualServerMessage(message.message, message.event, 'The SSH session failed.', 'SSH 错误');
-    const failedSocket = socket;
-    event(text, message.event ?? 'error', true);
-    showFormError(text);
-    toast(text, 'error');
+    const failedSocket = session.socket;
+    say(text, message.event ?? 'error', true);
+    if (isFront(session)) {
+      showFormError(text);
+      toast(text, 'error');
+    }
     if (message.retryable === false) {
       // 客户端随后以 4000 关闭会遮住服务端关闭码，先停止重连才能避免重试旧凭据。
-      sshReconnectManager?.reset();
-      sshReconnectManager = null;
-      reconnectParams = null;
+      session.reconnectManager?.reset();
+      session.reconnectManager = null;
+      session.reconnectParams = null;
     }
-    failActiveConnection(failedSocket, 'SSH session failed', messageTranslation(text));
+    failActiveConnection(session, failedSocket, 'SSH session failed', messageTranslation(text));
     return;
   }
   if (type === 'debug') {
-    event(bilingualServerMessage(message.message, message.event, 'Debug event'), 'debug');
+    say(bilingualServerMessage(message.message, message.event, 'Debug event'), 'debug');
     return;
   }
   if (type === 'status') {
     const text = bilingualServerMessage(message.message, message.event, 'SSH handshake in progress');
-    event(text, message.event ?? 'status');
-    updateConnectionStatus(messageTranslation(text));
-    if (message.event === 'shell_ready' || message.event === 'ready') markReady(text);
+    say(text, message.event ?? 'status');
+    report(messageTranslation(text));
+    if (message.event === 'shell_ready' || message.event === 'ready') markReady(session, text);
   }
 }
 
-async function handleSocketData(data: string | ArrayBuffer | Blob, activeSocket: WebSocket, generation: number): Promise<void> {
-  if (socket !== activeSocket || generation !== connectGeneration) return;
+async function handleSocketData(session: SessionContext, data: string | ArrayBuffer | Blob, activeSocket: WebSocket, generation: number): Promise<void> {
+  if (session.socket !== activeSocket || generation !== session.generation) return;
+  const say: typeof event = isFront(session) ? event : () => undefined;
   if (typeof data === 'string') {
     let parsed: unknown;
     try {
       parsed = JSON.parse(data);
     } catch {
-      event(bilingual('已忽略无效的控制帧。', 'Ignored an invalid control frame.'), 'protocol', true);
+      say(bilingual('已忽略无效的控制帧。', 'Ignored an invalid control frame.'), 'protocol', true);
       return;
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      event(bilingual('已忽略无效的控制帧。', 'Ignored an invalid control frame.'), 'protocol', true);
+      say(bilingual('已忽略无效的控制帧。', 'Ignored an invalid control frame.'), 'protocol', true);
       return;
     }
     try {
-      handleServerMessage(parsed as ServerMessage);
+      handleServerMessage(session, parsed as ServerMessage);
     } catch {
-      event(bilingual('处理服务器控制消息时发生错误。', 'Failed to process the server control message.'), 'protocol', true);
+      say(bilingual('处理服务器控制消息时发生错误。', 'Failed to process the server control message.'), 'protocol', true);
       if (activeSocket.readyState < WebSocket.CLOSING) {
         activeSocket.close(CLIENT_CLOSE_PROTOCOL_ERROR, 'Control message handling failed');
       }
@@ -1615,34 +1789,37 @@ async function handleSocketData(data: string | ArrayBuffer | Blob, activeSocket:
     return;
   }
   const bytes = data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : new Uint8Array(data);
-  if (socket !== activeSocket || generation !== connectGeneration) return;
-  if (decoder.encoding === 'utf-8') terminal.write(bytes);
-  else terminal.write(decoder.decode(bytes, { stream: true }));
+  if (session.socket !== activeSocket || generation !== session.generation) return;
+  // Terminal output always lands in this session's own xterm host, hidden or not.
+  if (session.decoder.encoding === 'utf-8') session.terminal.write(bytes);
+  else session.terminal.write(session.decoder.decode(bytes, { stream: true }));
 }
 
 function sendTerminalData(data: string): void {
-  if (socket?.readyState !== WebSocket.OPEN || connectionState !== 'connected' || !data) return;
-  socket.send(JSON.stringify({ type: 'input', data }));
+  if (ctx.socket?.readyState !== WebSocket.OPEN || ctx.state !== 'connected' || !data) return;
+  ctx.socket.send(JSON.stringify({ type: 'input', data }));
 }
 
-function failActiveConnection(activeSocket: WebSocket | null, closeReason: string, displayReason: LocalizedMessage): void {
-  if (activeSocket && socket === activeSocket) socket = null;
-  connectGeneration++;
-  currentSessionId = '';
-  pendingHistory = null;
-  authorizationAbort?.abort();
-  authorizationAbort = null;
-  currentExpectedFingerprint = '';
-  currentRememberedFingerprint = '';
-  stopTimers();
-  fileManager.reset();
-  fileTree?.setReady(false);
-  processManager.reset();
-  resetNetworkMetric();
-  clearHostKeyPrompt();
-  invalidateHistoryPasswordLoad();
-  updateConnectionStatus(displayReason);
-  setState('error');
+function failActiveConnection(session: SessionContext, activeSocket: WebSocket | null, closeReason: string, displayReason: LocalizedMessage): void {
+  if (activeSocket && session.socket === activeSocket) session.socket = null;
+  session.generation++;
+  session.backendSessionId = '';
+  session.pendingHistory = null;
+  session.authorizationAbort?.abort();
+  session.authorizationAbort = null;
+  session.expectedFingerprint = '';
+  session.rememberedFingerprint = '';
+  stopTimers(session);
+  session.fileManager.reset();
+  session.fileTree?.setReady(false);
+  session.processManager.reset();
+  if (isFront(session)) {
+    resetNetworkMetric();
+    clearHostKeyPrompt();
+    invalidateHistoryPasswordLoad();
+    updateConnectionStatus(displayReason);
+  }
+  setSessionState(session, 'error');
   if (activeSocket && activeSocket.readyState < WebSocket.CLOSING) activeSocket.close(CLIENT_CLOSE_SESSION_ERROR, closeReason);
 }
 
@@ -1668,12 +1845,16 @@ async function issueTicket(signal: AbortSignal): Promise<{ ticket: string; sessi
 }
 
 /** Factory that builds a fresh SSH WebSocket for reconnection attempts. */
-function createSshReconnectFactory(): (attempt: number) => Promise<WebSocket> {
+function createSshReconnectFactory(session: SessionContext): (attempt: number) => Promise<WebSocket> {
+  // Reconnects use this session's own dial-time snapshot, never the form (which
+  // may already point at another host), and only speak up if it is in front.
+  const say: typeof event = (message, category, error, alternate) => { if (isFront(session)) event(message, category, error, alternate); };
+  const report: typeof updateConnectionStatus = (message) => { if (isFront(session)) updateConnectionStatus(message); };
   return async (attempt: number): Promise<WebSocket> => {
-    const params = reconnectParams!;
+    const params = session.reconnectParams!;
     const abortController = new AbortController();
     const { ticket, sessionId } = await issueTicket(abortController.signal);
-    currentSessionId = sessionId;
+    session.backendSessionId = sessionId;
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = new URL('/api/ssh', location.href);
@@ -1681,18 +1862,18 @@ function createSshReconnectFactory(): (attempt: number) => Promise<WebSocket> {
     url.searchParams.set('ticket', ticket);
     url.searchParams.set('session', sessionId);
 
-    const generation = ++connectGeneration;
+    const generation = ++session.generation;
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
 
     ws.addEventListener('open', () => {
-      if (generation !== connectGeneration) {
+      if (generation !== session.generation) {
         ws.close(1000, 'Connection superseded');
         return;
       }
-      // Reset terminal for the new session.
-      resetTerminalForConnection(terminal);
-      fitTerminal(true);
+      // Reset this session's own terminal for the new run.
+      resetTerminalForConnection(session.terminal);
+      if (isFront(session)) fitTerminal(true);
 
       const config: ConnectionConfig = {
         type: 'connect',
@@ -1700,8 +1881,8 @@ function createSshReconnectFactory(): (attempt: number) => Promise<WebSocket> {
         port: params.port,
         username: params.username,
         authMethod: params.authMethod as AuthMethod,
-        cols: terminal.cols,
-        rows: terminal.rows,
+        cols: session.terminal.cols,
+        rows: session.terminal.rows,
         term: params.term,
       };
       if (params.authMethod === 'password') config.password = params.password;
@@ -1712,85 +1893,125 @@ function createSshReconnectFactory(): (attempt: number) => Promise<WebSocket> {
       if (params.pinnedKey) config.expectedFingerprint = params.pinnedKey;
 
       ws.send(JSON.stringify(config));
-      updateConnectionStatus(localized('正在打开 TCP 连接...', 'Opening TCP connection...'));
-      event(bilingual('WebSocket 已建立，正在打开 SSH 传输（自动重连）。', 'WebSocket established; opening SSH transport (auto-reconnect).'), 'transport');
+      report(localized('正在打开 TCP 连接...', 'Opening TCP connection...'));
+      say(bilingual('WebSocket 已建立，正在打开 SSH 传输（自动重连）。', 'WebSocket established; opening SSH transport (auto-reconnect).'), 'transport');
     }, { once: true });
 
     ws.addEventListener('message', (socketEvent) => {
-      void handleSocketData(socketEvent.data as string | ArrayBuffer | Blob, ws, generation);
+      void handleSocketData(session, socketEvent.data as string | ArrayBuffer | Blob, ws, generation);
     });
 
     ws.addEventListener('error', () => {
-      if (socket !== ws) return;
+      if (session.socket !== ws) return;
       const message = localized('WebSocket 传输错误。', 'WebSocket transport error.');
-      event(localize(message), 'transport', true);
+      say(localize(message), 'transport', true);
     });
 
-    socket = ws;
-    currentExpectedFingerprint = params.pinnedKey ?? '';
-    decoder = createDecoder(params.encoding);
+    session.socket = ws;
+    session.expectedFingerprint = params.pinnedKey ?? '';
+    session.decoder = createDecoder(params.encoding);
     return ws;
   };
 }
 
 /** Handles reconnect lifecycle events and updates the SSH UI accordingly. */
-function handleSshReconnectLog(entry: ReconnectLogEntry): void {
+function handleSshReconnectLog(session: SessionContext, entry: ReconnectLogEntry): void {
+  const say: typeof event = (message, category, error, alternate) => { if (isFront(session)) event(message, category, error, alternate); };
+  const report: typeof updateConnectionStatus = (message) => { if (isFront(session)) updateConnectionStatus(message); };
   if (entry.event === 'disconnect' && entry.code === SERVER_CLOSE_AUTH_DEFECT) {
-    // 控制帧丢失时以关闭码兜底；统一覆盖首次连接和重连工厂创建的 socket。
-    sshReconnectManager?.reset();
-    sshReconnectManager = null;
-    reconnectParams = null;
+    // 控制帧丢失时以关闭码兜底；统一覆盖首次连接和重连工厂创建的会话 socket。
+    session.reconnectManager?.reset();
+    session.reconnectManager = null;
+    session.reconnectParams = null;
     const reason = bilingual('SSH 认证或主机密钥确认失败，请检查后重试。', 'SSH authentication or host key approval failed; check the settings and try again.');
-    showFormError(reason);
-    event(reason, 'disconnect', true);
-    toast(reason, 'error');
-    failActiveConnection(socket, 'SSH authentication failed', messageTranslation(reason));
+    if (isFront(session)) {
+      showFormError(reason);
+      toast(reason, 'error');
+    }
+    say(reason, 'disconnect', true);
+    failActiveConnection(session, session.socket, 'SSH authentication failed', messageTranslation(reason));
   } else if (entry.event === 'give_up') {
     // Reconnect exhausted — perform full cleanup that was deferred.
     const reason = bilingual('SSH 重连失败，已达最大重试次数。', 'SSH reconnect failed; maximum retries reached.');
-    event(reason, 'disconnect', true);
-    updateConnectionStatus(messageTranslation(reason));
-    setState('error');
-    toast(reason, 'error');
-    fileManager.reset();
-    fileTree?.setReady(false);
-    processManager.reset();
+    say(reason, 'disconnect', true);
+    report(messageTranslation(reason));
+    if (isFront(session)) toast(reason, 'error');
+    session.fileManager.reset();
+    session.fileTree?.setReady(false);
+    session.processManager.reset();
+    setSessionState(session, 'error');
   } else if (entry.event === 'reconnect_attempt') {
-    updateConnectionStatus(localized(
+    report(localized(
       `正在重连 SSH（${entry.attempt}/${entry.maxAttempts}）…`,
       `Reconnecting SSH (${entry.attempt}/${entry.maxAttempts})…`,
     ));
   } else if (entry.event === 'reconnect_success') {
-    event(bilingual('SSH 重连成功。', 'SSH reconnected successfully.'), 'connect');
+    say(bilingual('SSH 重连成功。', 'SSH reconnected successfully.'), 'connect');
   }
 }
 
-async function connect(): Promise<void> {
+/**
+ * A dial that never took off must not silently return: the caller would keep
+ * going and drop the user into an empty workspace with nothing connected. The
+ * same copy is shown on the form and handed back to whoever asked, so the
+ * dashboard can stay on the host overview instead of faking a connection.
+ */
+function dialFailed(text: string): never {
+  showFormError(text);
+  throw new Error(text);
+}
+
+/**
+ * Which session should carry this dial. Idle contexts are reused (including the
+ * empty one created at bootstrap) instead of leaking one per attempt; the two
+ * configured ceilings stop the registry from growing without bound.
+ */
+function resolveDialSession(key: string): SessionContext | null {
+  const reusable = sessions.all().find((session) => session.targetKey === key && (session.state === 'idle' || session.state === 'error'))
+    ?? sessions.all().find((session) => session.targetKey === '' && session.state === 'idle');
+  if (reusable) {
+    reusable.targetKey = key;
+    return reusable;
+  }
+  const limit = sessions.checkLimit(key);
+  if (limit !== 'ok') {
+    return dialFailed(limit === 'target'
+      ? bilingual(`该主机的会话数已达上限（${MAX_SESSIONS_PER_TARGET}），请先断开其中一个。`, `This host already has ${MAX_SESSIONS_PER_TARGET} sessions; close one before dialling again.`)
+      : bilingual(`会话总数已达上限（${MAX_SESSIONS_TOTAL}），请先断开一个会话。`, `Session limit reached (${MAX_SESSIONS_TOTAL}); close one session first.`));
+  }
+  return createSession();
+}
+
+async function connect(options: { newSession?: boolean } = {}): Promise<void> {
   if (historyPasswordLoading) return;
   applyFormDefaults();
-  if (connectionState === 'connecting' || connectionState === 'connected' || connectionState === 'disconnecting') {
-    // Repeat clicks for the host already online stay a no-op (this also keeps
-    // the reconnect manager from dialling twice).
-    if (targetKey() === currentTargetKey) return;
-    // A different target means "switch session": this page carries one session
-    // at a time. Validate before tearing down, so a typo never drops the live
-    // session, then retire it instead of silently doing nothing.
-    if (validateConnectForm()) return;
-    disconnect(bilingual('已切换到新的主机目标', 'Switched to a new host target'));
-    await waitForIdle();
-    if (connectionState === 'connecting' || connectionState === 'connected' || connectionState === 'disconnecting') return;
+  const key = targetKey();
+  // A target already talking never gets a second dial: this keeps the reconnect
+  // manager from racing itself, and it is also how "go back to my shell" works
+  // after returning to the dashboard. The check spans every session in the
+  // registry, so an existing background session is reused instead of replaced —
+  // unless the dashboard explicitly asked for another session.
+  const live = options.newSession ? undefined : sessions.forTarget(key).find((session) =>
+    session.state === 'connected' || session.state === 'connecting' || session.state === 'disconnecting');
+  if (live) {
+    activateSession(live.id);
+    dashboard?.openWorkspace();
+    restoreHostKeyPrompt();
+    return;
   }
-  if (socket || authorizationAbort) return;
+  // Any *other* host keeps running: sessions are independent now, so switching
+  // target no longer tears down what is already connected.
+  const session = resolveDialSession(key);
+  if (!session) return;
+  activateSession(session.id);
+  if (session.socket || session.authorizationAbort) return;
   historyPasswordLoadGeneration++;
   historyPasswordLoading = false;
   // Fresh baseline for a new session: the previous run may have left network
   // state (interface list, baselines) if the user navigated away uncleanly.
   resetNetworkMetric();
   const validationError = validateConnectForm();
-  if (validationError) {
-    showFormError(validationError);
-    return;
-  }
+  if (validationError) dialFailed(validationError);
   if (document.body.dataset.view !== 'files') dashboard?.openWorkspace();
   if (location.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
     showFormError(bilingual('发送 SSH 凭据前必须使用 HTTPS。', 'HTTPS is required before SSH credentials can be sent.'));
@@ -1799,33 +2020,35 @@ async function connect(): Promise<void> {
 
   ui.formError.hidden = true;
   currentFormError = null;
-  const generation = ++connectGeneration;
+  const generation = ++session.generation;
   const abortController = new AbortController();
-  authorizationAbort = abortController;
+  session.authorizationAbort = abortController;
   ui.terminalEmpty.hidden = true;
-  resetTerminalForConnection(terminal);
+  // The session's own xterm host must be in front before any write lands.
+  mountTerminal(session).hidden = false;
+  resetTerminalForConnection(session.terminal);
   fitTerminal(false);
 
   const host = normalizeHost(ui.host.value);
   const port = Number(ui.port.value);
   const username = ui.username.value.trim();
-  currentTargetKey = targetKey(host, port, username);
-  currentTargetLabel = targetLabel(host, port, username);
-  setState('connecting');
-  const pinnedKey = ui.fingerprint.value.trim() || hostKeys[currentTargetKey] || '';
-  currentExpectedFingerprint = pinnedKey;
-  currentRememberedFingerprint = '';
+  session.targetKey = targetKey(host, port, username);
+  session.targetLabel = targetLabel(host, port, username);
+  setSessionState(session, 'connecting');
+  const pinnedKey = ui.fingerprint.value.trim() || hostKeys[session.targetKey] || '';
+  session.expectedFingerprint = pinnedKey;
+  session.rememberedFingerprint = '';
   if (pinnedKey) ui.fingerprint.value = pinnedKey;
   // 文件管理不应在隐藏终端里执行用户的初始命令；保存的主机配置仍保持原样。
-  currentInitialCommand = document.body.dataset.view === 'files' ? '' : ui.initialCommand.value;
-  initialCommandSent = false;
-  pendingHostKey = null;
-  awaitingHostKeyDecision = false;
-  decoder = createDecoder(ui.encoding.value);
-  ui.sessionTitle.textContent = currentTargetLabel;
+  session.initialCommand = document.body.dataset.view === 'files' ? '' : ui.initialCommand.value;
+  session.initialCommandSent = false;
+  session.pendingHostKey = null;
+  session.awaitingHostKeyDecision = false;
+  session.decoder = createDecoder(ui.encoding.value);
+  renderSessionHeader(session);
   updateConnectionStatus(localized('正在授权 Worker 会话...', 'Authorizing Worker session...'));
   ui.metricHostKey.textContent = '--';
-  event(bilingual(`正在连接 ${currentTargetLabel}`, `Starting ${currentTargetLabel}`), 'connect');
+  event(bilingual(`正在连接 ${session.targetLabel}`, `Starting ${session.targetLabel}`), 'connect');
 
   try {
     const password = ui.password.value;
@@ -1837,12 +2060,12 @@ async function connect(): Promise<void> {
     const historyProfile = readProfileFromForm(password);
     // Resolve encryption during the SSH handshake so ready can usually save synchronously.
     void historyProfile.catch(() => undefined);
-    pendingHistory = { generation, target: currentTargetKey, profile: historyProfile };
+    session.pendingHistory = { generation, target: session.targetKey, profile: historyProfile };
     const ticketRequest = issueTicket(abortController.signal);
     const { ticket, sessionId } = await ticketRequest;
-    currentSessionId = sessionId;
-    if (authorizationAbort === abortController) authorizationAbort = null;
-    if (generation !== connectGeneration) return;
+    session.backendSessionId = sessionId;
+    if (session.authorizationAbort === abortController) session.authorizationAbort = null;
+    if (generation !== session.generation) return;
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = new URL('/api/ssh', location.href);
     url.protocol = protocol;
@@ -1850,41 +2073,41 @@ async function connect(): Promise<void> {
     url.searchParams.set('session', sessionId);
 
     const activeSocket = new WebSocket(url);
-    socket = activeSocket;
+    session.socket = activeSocket;
     activeSocket.binaryType = 'arraybuffer';
 
     // Persist connection parameters so the reconnect factory can reuse them.
-    reconnectParams = { host, port, username, authMethod: method, term, encoding: ui.encoding.value };
-    if (method === 'password') reconnectParams.password = password;
-    else if (keychainId) reconnectParams.keychainId = keychainId;
-    else reconnectParams.privateKey = privateKey;
-    if (keychainId || privateKey) reconnectParams.keyPassphrase = keyPassphrase;
-    if (pinnedKey) reconnectParams.pinnedKey = pinnedKey;
+    session.reconnectParams = { host, port, username, authMethod: method, term, encoding: ui.encoding.value };
+    if (method === 'password') session.reconnectParams.password = password;
+    else if (keychainId) session.reconnectParams.keychainId = keychainId;
+    else session.reconnectParams.privateKey = privateKey;
+    if (keychainId || privateKey) session.reconnectParams.keyPassphrase = keyPassphrase;
+    if (pinnedKey) session.reconnectParams.pinnedKey = pinnedKey;
 
     // Set up (or replace) the SSH reconnect manager.
-    sshReconnectManager?.reset();
-    sshReconnectManager = new WebSocketReconnectManager({
+    session.reconnectManager?.reset();
+    session.reconnectManager = new WebSocketReconnectManager({
       id: 'SSH',
-      onConnect: createSshReconnectFactory(),
-      onLog: handleSshReconnectLog,
+      onConnect: createSshReconnectFactory(session),
+      onLog: (entry) => handleSshReconnectLog(session, entry),
       nonRetryableCloseCodes: [SERVER_CLOSE_AUTH_DEFECT],
     });
-    sshReconnectManager.attach(activeSocket);
+    session.reconnectManager.attach(activeSocket);
 
     activeSocket.addEventListener('open', () => {
-      if (socket !== activeSocket || generation !== connectGeneration) {
+      if (session.socket !== activeSocket || generation !== session.generation) {
         activeSocket.close(1000, 'Connection attempt superseded');
         return;
       }
-      fitTerminal(false);
+      if (isFront(session)) fitTerminal(false);
       const config: ConnectionConfig = {
         type: 'connect',
         host,
         port,
         username,
         authMethod: method,
-        cols: terminal.cols,
-        rows: terminal.rows,
+        cols: session.terminal.cols,
+        rows: session.terminal.rows,
         term,
       };
       if (method === 'password') config.password = password;
@@ -1893,68 +2116,19 @@ async function connect(): Promise<void> {
       if (method === 'publickey' && keyPassphrase) config.keyPassphrase = keyPassphrase;
       if (pinnedKey) config.expectedFingerprint = pinnedKey;
       activeSocket.send(JSON.stringify(config));
-      updateConnectionStatus(localized('正在打开 TCP 连接...', 'Opening TCP connection...'));
-      event(bilingual('WebSocket 已建立，正在打开 SSH 传输。', 'WebSocket established; opening SSH transport.'), 'transport');
-    }, { once: true });
-    activeSocket.addEventListener('message', (socketEvent) => {
-      void handleSocketData(socketEvent.data as string | ArrayBuffer | Blob, activeSocket, generation);
-    });
-    activeSocket.addEventListener('error', () => {
-      if (socket !== activeSocket) return;
-      const message = localized('WebSocket 传输错误。', 'WebSocket transport error.');
-      event(localize(message), 'transport', true);
-      showFormError(localize(message));
-      toast(localize(message), 'error');
-      failActiveConnection(activeSocket, 'WebSocket transport error', message);
-    });
-    activeSocket.addEventListener('close', (closeEvent) => {
-      if (socket !== activeSocket) return;
-      socket = null;
-      currentSessionId = '';
-      pendingHistory = null;
-      currentExpectedFingerprint = '';
-      currentRememberedFingerprint = '';
-      const wasActive = connectionState === 'connected';
-      const isUnexpected = closeEvent.code !== 1000 && closeEvent.code !== 1005;
-
-      if (isUnexpected && sshReconnectManager) {
-        // The reconnect manager will attempt reconnection autonomously.
-        // Skip tearing down child connections — they each have their own
-        // reconnect logic that fires independently.
-        stopTimers();
-        resetNetworkMetric();
-        clearHostKeyPrompt();
-        invalidateHistoryPasswordLoad();
-        const reason = bilingual('SSH 连接断开，正在重连…', 'SSH connection lost; reconnecting…');
-        event(reason, 'disconnect', true);
-        updateConnectionStatus(messageTranslation(reason));
-        setState('connecting');
-        if (wasActive) toast(reason, 'error');
-        return;
+      if (isFront(session)) {
+        updateConnectionStatus(localized('正在打开 TCP 连接...', 'Opening TCP connection...'));
+        event(bilingual('WebSocket 已建立，正在打开 SSH 传输。', 'WebSocket established; opening SSH transport.'), 'transport');
       }
-
-      // Normal close or reconnect not available — full cleanup.
-      stopTimers();
-      fileManager.reset();
-      fileTree?.setReady(false);
-      processManager.reset();
-      resetNetworkMetric();
-      clearHostKeyPrompt();
-      invalidateHistoryPasswordLoad();
-      const reason = closeEvent.reason
-        ? bilingualServerMessage(closeEvent.reason)
-        : closeEvent.code === 1000
-          ? bilingual('会话已关闭。', 'Session closed.')
-          : bilingual(`会话已关闭（${closeEvent.code}）。`, `Session closed (${closeEvent.code}).`);
-      event(reason, 'disconnect', isUnexpected);
-      updateConnectionStatus(messageTranslation(reason));
-      setState(isUnexpected ? 'error' : 'idle');
-      if (wasActive) toast(reason, isUnexpected ? 'error' : 'info');
-    });
+    }, { once: true });
+    attachSessionSocket(session, activeSocket, generation);
   } catch (error) {
-    if (authorizationAbort === abortController) authorizationAbort = null;
-    if (generation !== connectGeneration) return;
-    pendingHistory = null;
+    if (session.authorizationAbort === abortController) session.authorizationAbort = null;
+    if (generation !== session.generation) return;
+    session.pendingHistory = null;
+    // Error surfacing belongs to whoever is in front; another session's failure
+    // must not steal the form.
+    if (!isFront(session)) return;
     invalidateHistoryPasswordLoad();
     clearHostKeyPrompt();
     const message = error instanceof DOMException && error.name === 'AbortError'
@@ -1965,39 +2139,202 @@ async function connect(): Promise<void> {
     showFormError(message);
     event(message, 'authorization', true);
     toast(message, 'error');
-    setState('error');
+    setSessionState(session, 'error');
   }
 }
 
-function disconnect(reason = bilingual('已由用户断开连接', 'Disconnected by user')): void {
-  if (connectionState === 'disconnecting') return;
-  const generation = ++connectGeneration;
-  setState('disconnecting');
-  currentSessionId = '';
-  pendingHistory = null;
-  authorizationAbort?.abort();
-  authorizationAbort = null;
-  const activeSocket = socket;
-  socket = null;
-  sshReconnectManager?.reset();
-  sshReconnectManager = null;
-  reconnectParams = null;
-  stopTimers();
-  fileManager.reset();
-  fileTree?.setReady(false);
-  processManager.reset();
-  resetNetworkMetric();
-  clearHostKeyPrompt();
-  invalidateHistoryPasswordLoad();
-  currentExpectedFingerprint = '';
-  currentRememberedFingerprint = '';
-  updateConnectionStatus(messageTranslation(reason));
-  event(reason, 'disconnect');
+/**
+ * Everything a session socket needs once it is open: routing inbound messages,
+ * and the whole teardown tree when it ends. Shared by a fresh dial and by a
+ * resume, because a shell picked up after a reload must not drift away from a
+ * shell that was just dialled — the failure paths especially are too easy to get
+ * subtly wrong in only one of them.
+ */
+function attachSessionSocket(session: SessionContext, socket: WebSocket, generation: number): void {
+  socket.addEventListener('message', (socketEvent) => {
+    void handleSocketData(session, socketEvent.data as string | ArrayBuffer | Blob, socket, generation);
+  });
+  socket.addEventListener('error', () => {
+    if (session.socket !== socket) return;
+    const message = localized('WebSocket 传输错误。', 'WebSocket transport error.');
+    if (isFront(session)) {
+      event(localize(message), 'transport', true);
+      showFormError(localize(message));
+      toast(localize(message), 'error');
+    }
+    failActiveConnection(session, socket, 'WebSocket transport error', message);
+  });
+  socket.addEventListener('close', (closeEvent) => {
+    if (session.socket !== socket) return;
+    session.socket = null;
+    session.backendSessionId = '';
+    session.pendingHistory = null;
+    session.expectedFingerprint = '';
+    session.rememberedFingerprint = '';
+    const front = isFront(session);
+    const wasActive = session.state === 'connected';
+    const isUnexpected = closeEvent.code !== 1000 && closeEvent.code !== 1005;
+
+    if (isUnexpected && session.reconnectManager) {
+      // The reconnect manager will attempt reconnection autonomously.
+      // Skip tearing down child connections — they each have their own
+      // reconnect logic that fires independently.
+      stopTimers(session);
+      setSessionState(session, 'connecting');
+      if (front) {
+        resetNetworkMetric();
+        clearHostKeyPrompt();
+        invalidateHistoryPasswordLoad();
+        const reason = bilingual('SSH 连接断开，正在重连…', 'SSH connection lost; reconnecting…');
+        event(reason, 'disconnect', true);
+        updateConnectionStatus(messageTranslation(reason));
+        toast(reason, 'error');
+      }
+      return;
+    }
+
+    // Normal close or reconnect not available — full cleanup.
+    stopTimers(session);
+    session.fileManager.reset();
+    session.fileTree?.setReady(false);
+    session.processManager.reset();
+    const reason = closeEvent.reason
+      ? bilingualServerMessage(closeEvent.reason)
+      : closeEvent.code === 1000
+        ? bilingual('会话已关闭。', 'Session closed.')
+        : bilingual(`会话已关闭（${closeEvent.code}）。`, `Session closed (${closeEvent.code}).`);
+    setSessionState(session, isUnexpected ? 'error' : 'idle');
+    if (front) {
+      resetNetworkMetric();
+      clearHostKeyPrompt();
+      invalidateHistoryPasswordLoad();
+      event(reason, 'disconnect', isUnexpected);
+      updateConnectionStatus(messageTranslation(reason));
+      if (wasActive) toast(reason, isUnexpected ? 'error' : 'info');
+    }
+  });
+}
+
+/**
+ * Exchange a session we already own for a fresh ticket. The answer is null once
+ * the server has moved on — an expired retention window, or an object restarted
+ * since — and there is nothing to be done about that but dial again.
+ */
+async function claimRestoredSession(sessionId: string): Promise<string | null> {
+  try {
+    const response = await fetch('/api/session/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    });
+    if (!response.ok) return null;
+    const payload = (await response.json()) as { ticket?: unknown };
+    return typeof payload.ticket === 'string' ? payload.ticket : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Take a shell this page left behind and grow a session around it again. The
+ * server-side half never disconnected — holding it open for exactly this moment
+ * is the whole point — so there is no credential to gather and no handshake to
+ * repeat: a fresh ticket buys us the same uplink, and from here on it behaves
+ * like any other session.
+ */
+async function resumeSession(record: RestorableSession): Promise<SessionContext | null> {
+  const ticket = await claimRestoredSession(record.backendSessionId);
+  if (!ticket) return null;
+
+  // Adopt the placeholder rather than adding an entry: this is the connection
+  // the page already had, not a new one.
+  const session = claimPlaceholderSession();
+  session.backendSessionId = record.backendSessionId;
+  session.targetKey = record.targetKey;
+  session.targetLabel = record.targetLabel;
+  setSessionState(session, 'connecting');
+  const generation = session.generation;
+  const socket = new WebSocket(`/api/ssh?ticket=${encodeURIComponent(ticket)}&session=${encodeURIComponent(record.backendSessionId)}`);
+  session.socket = socket;
+  attachSessionSocket(session, socket, generation);
+  socket.addEventListener('open', () => {
+    if (session.socket !== socket || generation !== session.generation) return;
+    socket.send(JSON.stringify({ type: 'resume', cols: session.terminal.cols, rows: session.terminal.rows }));
+    if (isFront(session)) updateConnectionStatus(localized('正在恢复上次的会话…', 'Restoring your session…'));
+  }, { once: true });
+  // A restored session has no reconnect manager — there are no credentials to
+  // dial with — so a socket that closes leaves nothing behind worth keeping.
+  socket.addEventListener('close', () => {
+    forgetRestorableSession(record.backendSessionId);
+    retireSession(session);
+  }, { once: true });
+  return session;
+}
+
+/**
+ * Reopen what was connected before this page loaded, then stop where we are. The
+ * restored sessions turn up in the tab strip and the session centre and the user
+ * picks one; a reload must not quietly drop them back into whichever shell was in
+ * front, nor dial anything on its own, because nothing here has that authority.
+ */
+async function restorePersistedSessions(): Promise<void> {
+  const records = loadRestorableSessions();
+  if (records.length === 0) return;
+  const restored: SessionContext[] = [];
+  for (const record of records) {
+    const session = await resumeSession(record);
+    if (session) restored.push(session);
+    else forgetRestorableSession(record.backendSessionId);
+  }
+  const resumed = restored.length;
+  if (resumed > 0) {
+    // They left in front of a running shell — put them back in front of one
+    // instead of making them go looking for what survived.
+    dashboard?.openWorkspace();
+    activateSession(restored[0].id);
+  }
+  const notice = resumed > 0
+    ? bilingual(`已恢复 ${resumed} 个会话。`, `Restored ${resumed} session${resumed === 1 ? '' : 's'}.`)
+    : bilingual('之前的会话已结束，请重新连接。', 'The previous session has ended; connect again to open a new one.');
+  event(notice, resumed > 0 ? 'info' : 'disconnect');
+  toast(notice, resumed > 0 ? 'info' : 'error');
+}
+
+/** Tear down one session only; every other connection keeps running untouched. */
+function closeSession(session: SessionContext, reason = bilingual('已由用户断开连接', 'Disconnected by user')): void {
+  if (session.state === 'disconnecting') return;
+  const generation = ++session.generation;
+  setSessionState(session, 'disconnecting');
+  session.backendSessionId = '';
+  session.pendingHistory = null;
+  session.authorizationAbort?.abort();
+  session.authorizationAbort = null;
+  const activeSocket = session.socket;
+  session.socket = null;
+  session.reconnectManager?.reset();
+  session.reconnectManager = null;
+  session.reconnectParams = null;
+  stopTimers(session);
+  session.fileManager.reset();
+  session.fileTree?.setReady(false);
+  session.processManager.reset();
+  session.expectedFingerprint = '';
+  session.rememberedFingerprint = '';
+  // The meters, the prompt, the form guard and the event log are single widgets
+  // owned by the front session. Retiring a background one must not blank them.
+  if (isFront(session)) {
+    resetNetworkMetric();
+    clearHostKeyPrompt();
+    invalidateHistoryPasswordLoad();
+    updateConnectionStatus(messageTranslation(reason));
+    event(reason, 'disconnect');
+  }
   let settled = false;
   const finish = (): void => {
     if (settled) return;
     settled = true;
-    if (generation === connectGeneration && connectionState === 'disconnecting') setState('idle');
+    if (generation === session.generation && session.state === 'disconnecting') setSessionState(session, 'idle');
+    retireSession(session);
   };
   if (activeSocket && activeSocket.readyState < WebSocket.CLOSED) {
     activeSocket.addEventListener('close', finish, { once: true });
@@ -2006,6 +2343,127 @@ function disconnect(reason = bilingual('已由用户断开连接', 'Disconnected
   } else {
     window.setTimeout(finish, 180);
   }
+}
+
+/**
+ * Drop a retired session out of the registry, releasing its terminal and its
+ * managers. One empty session always remains so the workspace keeps a terminal
+ * to write into instead of going blank after the last disconnect.
+ */
+function retireSession(session: SessionContext): void {
+  if (session.state !== 'idle' && session.state !== 'error') return;
+  if (sessions.get(session.id) !== session) return;
+  sessions.remove(session.id);
+  try {
+    session.terminal.dispose();
+  } catch {
+    // The instance may already be gone if xterm's host was torn down first.
+  }
+  session.terminalEl?.remove();
+  if (ctx !== session) return;
+  // The UI followed this session; move it to whoever is left (or a new empty one).
+  setFrontSession(sessions.active ?? createSession());
+}
+
+/**
+ * Point everything at one session. Deliberately idempotent rather than
+ * short-circuiting when nothing changed: callers reach this from very different
+ * paths (tab tap, new dial, another session retiring) and every one of them is
+ * entitled to leave with the shared widgets owned by the front session.
+ */
+/**
+ * The header answers "where am I" the same way the host list does — flag, host
+ * name, then `user@host:port` — and keeps the shell state on the line below.
+ * Only the address used to be there, which left two perfectly good facts (which
+ * country, which saved host) unused while the list right beside it showed them.
+ * Resolved lazily from `profiles` because the location arrives with the host
+ * list, not with the dial.
+ */
+function renderSessionHeader(session: SessionContext = ctx): void {
+  const profile = session.targetKey
+    ? profiles.find((candidate) => sessionTargetKey(candidate.host, candidate.port, candidate.username) === session.targetKey)
+    : undefined;
+  const label = session.targetLabel || bilingual('无活动会话', 'No active session');
+  const name = profile?.name.trim();
+  ui.sessionTitle.textContent = name ? `${name} · ${label}` : label;
+
+  const flag = ui.sessionFlag;
+  flag.replaceChildren();
+  const location = profile?.location;
+  if (!location?.countryCode) {
+    flag.hidden = true;
+    flag.removeAttribute('role'); flag.removeAttribute('aria-label'); flag.removeAttribute('title');
+    return;
+  }
+  const place = [location.city || location.region || location.country, location.country].filter(Boolean).join(' · ');
+  flag.append(countryFlag(location.countryCode));
+  flag.hidden = false;
+  flag.setAttribute('role', 'img');
+  flag.setAttribute('aria-label', place);
+  flag.title = place;
+}
+
+function setFrontSession(session: SessionContext): void {
+  ctx = session;
+  // The topbar host name belongs to the session in front. The meters and the
+  // orb already follow a tab tap through mountSessionPanels()/setState(); the
+  // title was only written by connect() and resumeSession(), so switching tabs
+  // left the previous host's name on screen.
+  renderSessionHeader(session);
+  syncFormToSession(session);
+  sessions.activate(session.id);
+  showOnlyTerminal(session);
+  mountSessionPanels(session);
+  setState(session.state);
+  renderSessionTabs();
+  // The instance spent its time in the background without dimensions, so the
+  // very first thing after showing it is to measure it again.
+  fitTerminal(true);
+}
+
+/**
+ * Aim the connect form at the session the user just brought forward. Left
+ * alone, the form keeps describing whichever target was dialled last, so the
+ * connect button reads "connect" for a host that is already online and any dial
+ * from there would be aimed at the session in the background. Credentials are
+ * deliberately untouched — a session switch must never move a password.
+ */
+function syncFormToSession(session: SessionContext): void {
+  const params = session.reconnectParams;
+  if (!params?.host) return;
+  ui.profileId.value = profiles.find((profile) => passwordContext(profile) === session.targetKey)?.id ?? '';
+  ui.host.value = params.host;
+  ui.port.value = String(params.port);
+  ui.username.value = params.username;
+}
+
+/** Single-session entry point used by the toolbar and the compatibility API. */
+function disconnect(reason = bilingual('已由用户断开连接', 'Disconnected by user')): void {
+  closeSession(ctx, reason);
+}
+
+/**
+ * Returning to the host overview must NOT retire the session. Everything the
+ * connection needs — socket, auxiliary SFTP/process channels, timers and the
+ * per-session network buffers — keeps running so the user can come back to the
+ * same shell instead of a fresh login.
+ *
+ * The only thing still scrubbed is the connect form: `clearCredentials()`
+ * exists to stop one host's password leaking into the next host's handshake,
+ * and that guarantee must survive independent of the connection lifecycle. It
+ * is safe for reconnect because `ctx.reconnectParams` holds a value snapshot
+ * taken at dial time rather than reading the form.
+ */
+function detachSession(): void {
+  // Returning to the overview cancels any in-flight credential decrypt. This
+  // used to ride on `disconnect()` bumping the generation, but it is a property
+  // of *leaving the page*, not of tearing down the socket — file-page must not
+  // start a connection the user already navigated away from.
+  historyPasswordLoadGeneration++;
+  historyPasswordLoading = false;
+  clearCredentials();
+  hideHostKeyPrompt();
+  event(bilingual('已返回主机总览，SSH 会话保持连接。', 'Returned to host dashboard; the SSH session stays connected.'), 'session');
 }
 
 function createDecoder(encoding: string): TextDecoder {
@@ -2106,12 +2564,20 @@ function initializeCompatibilityAPI(): void {
     password?: string,
     privateKey?: string,
   ): Promise<void> => {
-    if (connectionState === 'connecting' || connectionState === 'connected' || connectionState === 'disconnecting') {
-      throw new Error(bilingual('已有活动的 SSH 连接', 'An SSH connection is already active'));
-    }
     const options: WSSHOptions = typeof optionsOrHost === 'string'
       ? { host: optionsOrHost, port, username, password, privateKey }
       : optionsOrHost;
+    // "Already connected" used to mean one global connection. With sessions it
+    // means this very target; any other host can still be dialled alongside.
+    const key = sessionTargetKey(
+      normalizeHost(options.host ?? options.hostname ?? ui.host.value),
+      Number(options.port ?? ui.port.value),
+      (options.username ?? ui.username.value).trim() || 'root',
+    );
+    if (sessions.forTarget(key).some((session) => session.state === 'connected'
+      || session.state === 'connecting' || session.state === 'disconnecting')) {
+      throw new Error(bilingual('该目标已有活动的 SSH 连接', 'An SSH connection to this target is already active'));
+    }
     applyWSSHOptions(options);
     await connect();
   };
@@ -2121,11 +2587,11 @@ function initializeCompatibilityAPI(): void {
     resize: () => fitTerminal(true),
     set_encoding: (encoding: string) => {
       ui.encoding.value = encoding;
-      decoder = createDecoder(encoding);
+      ctx.decoder = createDecoder(encoding);
     },
     reset_encoding: () => {
       ui.encoding.value = 'utf-8';
-      decoder = new TextDecoder('utf-8');
+      ctx.decoder = new TextDecoder('utf-8');
     },
     disconnect,
   };
@@ -2142,10 +2608,10 @@ ui.form.addEventListener('submit', (formEvent) => {
   // Disconnect only ever applies to the session that owns the current form
   // target; with another host selected the button must dial that host instead.
   if (sessionOwnsFormTarget()) {
-    disconnect(connectionState === 'connecting'
+    closeSession(ctx, ctx.state === 'connecting'
       ? bilingual('连接已取消', 'Connection cancelled')
       : bilingual('已由用户断开连接', 'Disconnected by user'));
-  } else if (connectionState !== 'disconnecting') {
+  } else if (ctx.state !== 'disconnecting') {
     void connect();
   }
 });
@@ -2197,7 +2663,7 @@ ui.profileList.addEventListener('click', (clickEvent) => {
     clickEvent.stopPropagation();
     const id = deleteButton.dataset.deleteProfile;
     const target = profiles.find((profile) => profile.id === id);
-    if (target && pendingHistory?.target === passwordContext(target)) pendingHistory = null;
+    if (target && ctx.pendingHistory?.target === passwordContext(target)) ctx.pendingHistory = null;
     void deleteProfile(id);
     return;
   }
@@ -2209,7 +2675,7 @@ ui.panelToggle.addEventListener('click', () => {
   const opening = !panelOpen;
   setPanelOpen(opening);
   if (opening) requestAnimationFrame(() => {
-    if (connectionState === 'connecting' || connectionState === 'connected' || connectionState === 'disconnecting') ui.connect.focus();
+    if (ctx.state === 'connecting' || ctx.state === 'connected' || ctx.state === 'disconnecting') ui.connect.focus();
     else ui.host.focus();
   });
 });
@@ -2221,7 +2687,7 @@ ui.emptyConnect.addEventListener('click', () => {
   setPanelOpen(true);
   requestAnimationFrame(() => ui.host.focus());
 });
-ui.clearTerminal.addEventListener('click', () => terminal.clear());
+ui.clearTerminal.addEventListener('click', () => ctx.terminal.clear());
 ui.fullscreenTerminal.addEventListener('click', async () => {
   if (document.fullscreenElement === ui.terminalCard) await document.exitFullscreen();
   else await ui.terminalCard.requestFullscreen();
@@ -2252,9 +2718,9 @@ ui.eventToggle.addEventListener('keydown', handleWorkspaceTabKey);
 ui.languageToggle.addEventListener('click', () => {
   applyLanguage(currentLanguage === 'zh-CN' ? 'en' : 'zh-CN', true);
   renderProfiles();
-  setState(connectionState);
+  setState(ctx.state);
   setPanelOpen(panelOpen);
-  if (connectionState === 'idle' && !currentTargetLabel) ui.sessionTitle.textContent = bilingual('无活动会话', 'No active session');
+  if (ctx.state === 'idle' && !ctx.targetLabel) renderSessionHeader(ctx);
 });
 ui.themeToggle.addEventListener('click', () => {
   const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
@@ -2267,6 +2733,11 @@ ui.hostKeyDialog.addEventListener('cancel', (cancelEvent) => {
   ui.hostKeyDialog.close('reject');
 });
 ui.hostKeyDialog.addEventListener('close', () => {
+  // Closing from `hideHostKeyPrompt()` is a navigation, not a verdict.
+  if (suppressHostKeyDialogClose) {
+    suppressHostKeyDialogClose = false;
+    return;
+  }
   sendHostKeyDecision(ui.hostKeyDialog.returnValue === 'accept');
 });
 // Bind the network interface selector once. Options are rebuilt by
@@ -2274,20 +2745,27 @@ ui.hostKeyDialog.addEventListener('close', () => {
 // element keeps focus while the user interacts with it.
 ui.resourceNetworkSelect.addEventListener('change', () => {
   const next = ui.resourceNetworkSelect.value;
-  if (!next || next === netSelectedIface) return;
-  netSelectedIface = next;
+  if (!next || next === ctx.netSelectedIface) return;
+  ctx.netSelectedIface = next;
   resetNetworkBaseline();
   updateNetworkIfaceLabel();
 });
-terminal.onData((data) => terminalTools?.handleTerminalData(data));
+// Keystrokes reach the terminal that owns the UI; each session bound its own
+// `onData` handler in `attachSessionRuntime()`.
 new ResizeObserver(() => fitTerminal(true)).observe(ui.terminalStage);
 window.addEventListener('beforeunload', () => {
-  fileManager.reset();
-  fileTree?.setReady(false);
-  fileTree?.destroy();
-  processManager.reset();
+  for (const session of sessions.all()) {
+    session.fileManager.reset();
+    session.fileTree?.setReady(false);
+    session.fileTree?.destroy();
+    session.processManager.reset();
+    // Not 1000 — that code means "disconnect me". 4003 tells the server the tab
+    // is unloading while the session itself is still wanted, so the Durable
+    // Object holds the shell for a few minutes in case this page comes back.
+    // Keep in sync with CLOSE_PAGE_UNLOAD in src/backend/session-retention.ts.
+    session.socket?.close(4003, 'Page closed');
+  }
   resetNetworkMetric();
-  socket?.close(1000, 'Page closed');
 });
 
 document.addEventListener('keydown', (keyEvent) => {
@@ -2308,7 +2786,7 @@ async function initialize(): Promise<void> {
   setAuthMethod('password');
   setState('idle');
   setWorkspaceTab(null);
-  ui.sessionTitle.textContent = bilingual('无活动会话', 'No active session');
+  renderSessionHeader(ctx);
   ui.sessionSubtitle.textContent = bilingual('选择目标并连接', 'Choose a target and connect');
   ui.eventMessage.textContent = bilingual('Worker 运行时待命', 'Worker runtime standing by');
   initializeCompatibilityAPI();
@@ -2326,9 +2804,12 @@ async function initialize(): Promise<void> {
     disconnect: () => disconnect(),
     openTerminal: () => {
       dashboard?.openWorkspace();
-      if (connectionState === 'idle' || connectionState === 'error') setPanelOpen(true);
+      if (ctx.state === 'idle' || ctx.state === 'error') setPanelOpen(true);
     },
-  }, fileManager);
+    sessions: () => sessions.list(),
+    activeSessionId: () => sessions.activeIdOrNull,
+    activateSession: (id) => activateSession(id),
+  });
   keychain = new Keychain(() => dashboard?.openWorkspace());
   keychain.addEventListener('change', () => fillKeychainSelect(ui.keychainId, keychain.keys));
   ui.form.querySelector('input[name="authMethod"][value="keychain"]')!.addEventListener('change', () => void keychain.load());
@@ -2336,7 +2817,7 @@ async function initialize(): Promise<void> {
   dashboard = new Dashboard({
     keychain,
     files: filePage,
-    snippets: new Snippets(ui.terminalCard, (snippet) => {
+    snippets: new Snippets(document.querySelector<HTMLElement>('#app .topbar-actions')!, (snippet) => {
       // 片段只进入草稿，尤其多行命令不能通过粘贴意外立即执行。
       const input = document.getElementById('command-editor-input') as HTMLTextAreaElement;
       if (input.value.trim() && input.value !== snippet.command
@@ -2356,17 +2837,33 @@ async function initialize(): Promise<void> {
       await applyProfile(host);
       await connect();
     },
+    newSession: async (host) => {
+      await applyProfile(host);
+      await connect({ newSession: true });
+    },
     quickConnect: () => {
       clearForm();
       setPanelOpen(true);
       requestAnimationFrame(() => { fitTerminal(false); ui.host.focus(); });
     },
     leaveWorkspace: () => {
-      disconnect(bilingual('已返回主机总览', 'Returned to host dashboard'));
-      clearCredentials();
+      detachSession();
+    },
+    // Dashboard 是纯视图：会话归这里的注册表所有，它只读快照，并把「切换前台」
+    // /「断开某一条」回呼给所有者，避免两处各维护一份状态。
+    sessions: () => sessions.list(),
+    activeSessionId: () => sessions.activeIdOrNull,
+    stateLabel: (state) => localize(SESSION_STATE_LABEL[state]),
+    activateSession: (id) => activateSession(id),
+    closeSession: (id) => {
+      const session = sessions.get(id);
+      if (session) closeSession(session, bilingual('会话已从会话中心断开', 'Session disconnected from the session centre'));
     },
   });
   await dashboard.start();
+  // Anything that was connected before this page loaded is still waiting on the
+  // server; go and claim it back before the user notices anything was missing.
+  await restorePersistedSessions();
 }
 
 void initialize().catch((error) => {
