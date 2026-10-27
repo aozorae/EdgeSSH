@@ -1,0 +1,78 @@
+name: PR 11 repair validation
+
+on:
+  push:
+    branches: [fix/pr11-editor-review]
+    paths:
+      - .github/workflows/pr11-repair.yml
+      - scripts/pr11-repair.patch
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export review source
+        run: git archive --format=tar.gz HEAD > /tmp/pr11-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr11-source
+          path: /tmp/pr11-source.tar.gz
+          retention-days: 3
+      - name: Apply reviewed repairs
+        id: repairs
+        shell: bash
+        run: |
+          if test -f scripts/pr11-repair.patch; then
+            git apply --check scripts/pr11-repair.patch
+            git apply scripts/pr11-repair.patch
+            rm scripts/pr11-repair.patch .github/workflows/pr11-repair.yml
+            echo 'applied=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Typecheck, unit tests and Worker dry run
+        run: npm run check 2>&1 | tee /tmp/pr11-check.log
+      - name: Build split frontend bundles
+        run: npm run build:web -- --manifest 2>&1 | tee /tmp/pr11-build.log
+      - name: Install browser
+        if: steps.repairs.outputs.applied == 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Browser regression tests
+        if: steps.repairs.outputs.applied == 'true'
+        run: npx playwright test 2>&1 | tee /tmp/pr11-browser.log
+      - name: Export validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr11-validation
+          path: |
+            /tmp/pr11-*.log
+            dist/.vite/manifest.json
+            test-results/
+          retention-days: 3
+      - name: Commit tested repairs to the isolated branch
+        if: success() && steps.repairs.outputs.applied == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(files): bound editor work and save traffic; await session shutdown'
+          git -c credential.helper='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' push origin HEAD:refs/heads/fix/pr11-editor-review
+          git log -1 --format='%H %s'
+          git show --stat --oneline HEAD
