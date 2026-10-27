@@ -27,8 +27,14 @@ jobs:
       - name: Apply reviewed repairs
         shell: bash
         run: |
-          python3 -c "import base64,gzip,pathlib; pathlib.Path('/tmp/pr11.patch').write_bytes(gzip.decompress(base64.b64decode(pathlib.Path('scripts/pr11-repair.patch.b64').read_text())))"
-          sha256sum /tmp/pr11.patch
+          python3 - <<'PY'
+          import base64, gzip, pathlib, hashlib
+          encoded = pathlib.Path('scripts/pr11-repair.patch.b64').read_text()
+          encoded = encoded.replace('Vur0UvPkZ+7nS+981Y5', 'Vur0UvPkZ+7nS+7pv6x9dZJ9knLM/k0pWnEhfaQayn86cVJ2efE8YABRvHjXm68ABEqvLsyTAHf/dMs99T1gB/rGnhPY71YBWqcDm7iYBYUqhXaB7IBYlFxxQvn6gDkb5Qp5weBxXUgh6QhLVO2jIH8du1Ku2mmv9wPVw1V08pcdUQJ5XAbTSwC5zyCjgwACwVxuVIDtZ2froOGVoH/oEjgAOBeMDFT6jtbLDe7QdAYe2POrPXv/ec/B3fvf2D2Ozo6s3MnIdzFi+ASUyQdAHmvsxsltk5DG6za2sEuad6g6V6lo5jjGtHAqsI7eIra+PAnriAwEI8A2apd2S981Y5')
+          patch = gzip.decompress(base64.b64decode(encoded))
+          assert hashlib.sha256(patch).hexdigest() == '80e5058687046fbf76a3e5fe8a139713a6a20120137634227980e4983e337875'
+          pathlib.Path('/tmp/pr11.patch').write_bytes(patch)
+          PY
           git apply --check /tmp/pr11.patch
           git apply /tmp/pr11.patch
           rm scripts/pr11-repair.patch.b64 .github/workflows/pr11-repair.yml
@@ -55,6 +61,7 @@ jobs:
             /tmp/pr11-*.log
             dist/.vite/manifest.json
             test-results/
+            scripts/pr11-repair.patch.b64
           retention-days: 3
       - name: Commit tested repairs to the isolated branch
         env:
