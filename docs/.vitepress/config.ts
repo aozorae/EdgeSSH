@@ -92,6 +92,7 @@ export default defineConfig({
           { text: '管理主机', link: '/usage/hosts' },
           { text: '终端与主机指纹', link: '/usage/terminal' },
           { text: '文件与进程', link: '/usage/files-and-processes' },
+          { text: 'Agent CLI', link: '/usage/agent-cli' },
         ],
       },
       {

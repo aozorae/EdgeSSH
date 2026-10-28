@@ -72,3 +72,15 @@ test('首页站内入口及片段锚点均指向已构建页面', () => {
     }
   }
 });
+
+test('Agent CLI 独立页可从导航访问，并保留认证和写入安全边界', () => {
+  const html = readFileSync(path.join(dist, 'usage/agent-cli.html'), 'utf8');
+  const terminal = readFileSync(path.join(dist, 'usage/terminal.html'), 'utf8');
+  assert.ok(terminal.includes('href="/usage/agent-cli"'));
+  assert.match(html, /@aozorae\/edgessh/);
+  assert.match(html, /cloudflared/);
+  assert.match(html, /暂不支持 EdgeSSH 的 GitHub OAuth/);
+  assert.match(html, /不自动重试远端命令/);
+  assert.match(html, /不删除 cloudflared 共享缓存/);
+  assert.ok(sitemap.includes(`${origin}/usage/agent-cli`));
+});
