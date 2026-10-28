@@ -80,7 +80,7 @@ edgessh exec HOST_ID --json --timeout 120 --max-output 2097152 -- 'tail -n 200 /
 
 `--` 后是**一个完整命令参数**，按远端用户默认 Shell 解释，不在本地执行。每次 `exec` 都是新的 SSH 连接，不保留上次的 `cd`、变量或 Shell 状态。依赖同一上下文的步骤放进同一个命令，例如 `cd /opt/app && ./check.sh`。
 
-`exec` 不申请 PTY，stdin 立即 EOF，适合 Agent 非交互调用。不适用于需要输入密码、确认或持续从 stdin 读取内容的程序；将脚本通过 `put` 上传后再执行。交互式 `edgessh connect HOST_ID` 仅供用户在真实终端使用，`Ctrl+]` 退出。
+`exec` 不申请 PTY，stdin 立即 EOF，适合 Agent 非交互调用。命令必须为单行，UTF-8 编码后最多 4096 字节，不接受 NUL、回车或换行；多行或较长的脚本先通过 `put` 上传，再执行脚本文件。不适用于需要输入密码、确认或持续从 stdin 读取内容的程序。交互式 `edgessh connect HOST_ID` 仅供用户在真实终端使用，`Ctrl+]` 退出。
 
 ```json
 {"stdout":"Linux\n","stderr":"","exitCode":0,"signal":null}
@@ -153,6 +153,7 @@ edgessh exec HOST_ID --fingerprint 'SHA256:替换为已核实的指纹' --json -
 | --- | --- |
 | 认证 | 当前仅 Cloudflare Access；不支持 GitHub OAuth |
 | 时限 | exec 默认 60 秒，文件/交互默认 600 秒；`--timeout` 取 1..600 秒 |
+| 命令长度 | 单行且 UTF-8 最多 4096 字节；较长或多行脚本先上传再执行 |
 | 命令输出 | 默认 1 MiB；`--max-output` 最多 16 MiB，超限报错而非成功截断 |
 | 文件大小 | 单文件最多 64 MiB，逐块传输；无批量目录同步 |
 | 连接 | 每个操作建立独立 SSH，SFTP 复用该连接；成功/失败后释放 |
