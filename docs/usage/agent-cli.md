@@ -10,7 +10,7 @@ EdgeSSH CLI 让本地 AI Agent 通过现有 EdgeSSH 工作区执行 SSH 命令�
 
 | 条件 | 要求 |
 | --- | --- |
-| EdgeSSH 服务端 | 部署包含 CLI 协议的最新 main（[PR #10](https://github.com/aozorae/EdgeSSH/pull/10) 已合并） |
+| EdgeSSH 服务端 | 基础 CLI 协议已合并 main；2 GiB 上传需部署[大文件上传版本（PR #14）](https://github.com/aozorae/EdgeSSH/pull/14) |
 | 登录方式 | **Cloudflare Access**；暂不支持 EdgeSSH 的 GitHub OAuth 登录 |
 | 本地运行时 | Node.js 22.12 或更新版本，npm 随 Node.js 安装 |
 | Access 客户端 | 官方 [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)，安装后能在终端运行 `cloudflared --version` |
@@ -114,6 +114,22 @@ edgessh get HOST_ID /tmp/my-agent-task/config.json ./config.json --force
 
 覆盖上传使用隐藏临时文件和 OpenSSH `posix-rename@openssh.com` v1 原子落位；服务器不支持时拒绝覆盖并保留原文件，不先删除目标。下载完成并核对长度后才落到目标文件，失败清理本地 `.part` 文件。
 
+### 大文件上传
+
+CLI **0.2.0+** 和更新后的网页都支持单文件 **2 GiB** 上传；服务端也需更新到配套版本。旧 CLI 0.1.0 仍限制 64 MiB，新 CLI 的长传输期限不兼容旧服务端。先更新服务端，再升级 CLI：
+
+```sh
+npm install --global @aozorae/edgessh
+edgessh put HOST_ID ./backup.tar /tmp/backup.tar
+edgessh put HOST_ID ./backup.tar /tmp/backup.tar --timeout 86400
+```
+
+网页端在文件管理中选择目标目录后上传即可，无需把文件整体载入内存。两端都按 64 KiB 分块，最多 8 块（512 KiB）在途；进度以远端确认写入的字节为准，全部确认后才提交。
+
+`get/put` 默认时限为 **6 小时**，可用 `--timeout` 调到最多 **24 小时**，包含认证与建连时间。网页上传请保持页面、连接和设备运行；关闭页面、休眠或断网可能中断传输。**暂不支持断点续传或自动重试**，中断后先检查远端是否有半文件或覆盖上传的临时文件，再决定清理或重新上传。下载上限仍为 **64 MiB**，与上传上限不同。
+
+2 GiB 是应用的单文件限制，不绕过远端磁盘、权限及 SSH 策略；当前 SSH 会话不支持 rekey，服务端主动要求重新密钥交换时仍可能中断，需重新连接。
+
 ## 多步骤任务示例
 
 以下是给 Agent 的任务约定示例，不会自动执行，也不代表 CLI 自带发布事务或回滚引擎：
@@ -152,10 +168,10 @@ edgessh exec HOST_ID --fingerprint 'SHA256:替换为已核实的指纹' --json -
 | 项目 | 行为 |
 | --- | --- |
 | 认证 | 当前仅 Cloudflare Access；不支持 GitHub OAuth |
-| 时限 | exec 默认 60 秒，文件/交互默认 600 秒；`--timeout` 取 1..600 秒 |
+| 时限 | exec 默认 60 秒，交互/其他默认 600 秒，最多 600 秒；get/put 默认 21600 秒，最多 86400 秒 |
 | 命令长度 | 单行且 UTF-8 最多 4096 字节；较长或多行脚本先上传再执行 |
 | 命令输出 | 默认 1 MiB；`--max-output` 最多 16 MiB，超限报错而非成功截断 |
-| 文件大小 | 单文件最多 64 MiB，逐块传输；无批量目录同步 |
+| 文件大小 | 上传最多 2 GiB，下载最多 64 MiB；64 KiB 分块，上传最多 512 KiB 在途；无批量同步或断点续传 |
 | 连接 | 每个操作建立独立 SSH，SFTP 复用该连接；成功/失败后释放 |
 | 后台任务 | 断开 SSH 不保证终止 `nohup`、systemd 等脱离会话的进程 |
 | 使用成本 | CLI 不调用模型 API；SSH 握手、加密、流量及 DO 仍消耗 Cloudflare 资源 |

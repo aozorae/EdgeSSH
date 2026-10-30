@@ -9,7 +9,7 @@
 | SSH | SSH 2.0、交互式 Shell、PTY、窗口尺寸同步、Keepalive |
 | 密码认证 | password 与单密码提示 keyboard-interactive |
 | 私钥 | 未加密 OpenSSH Ed25519、RSA、ECDSA P-256/P-384/P-521 |
-| 文件 | SFTP v3，单文件上传与下载上限 64 MiB |
+| 文件 | SFTP v3，单文件上传上限为 2 GiB，下载上限为 64 MiB |
 | 目录 | 浏览、新建、重命名、删除空目录 |
 | 主机管理 | 单管理员最多 200 台，切换登录方式共用同一份资料 |
 | 终端编码 | UTF-8、GB18030、Big5，取决于浏览器支持 |
