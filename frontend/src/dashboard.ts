@@ -62,7 +62,6 @@ export class Dashboard {
       <div class="home-layout">
         <nav class="home-rail" aria-label="主导航">
           <button class="rail-item selected" id="rail-overview" aria-current="page">${icon('home')}<span>总览</span></button>
-          <button class="rail-item" id="rail-hosts">${icon('server')}<span>主机</span></button>
           <button class="rail-item" id="rail-files">${icon('folder')}<span>文件管理</span></button>
           <button class="rail-item" id="rail-snippets">${icon('snippets')}<span>代码片段</span></button>
           <button class="rail-item" id="rail-keychain"><span>密钥链</span></button>
@@ -148,11 +147,10 @@ export class Dashboard {
     this.dialog.addEventListener('close', () => { this.form.reset(); this.editing = undefined; this.returnFocus?.focus(); });
     this.get('#host-search').addEventListener('input', () => this.renderList());
     this.get('#refresh-hosts').addEventListener('click', () => void this.refresh());
-    for (const id of ['#rail-overview', '#rail-hosts']) this.get(id).addEventListener('click', async () => {
+    this.get('#rail-overview').addEventListener('click', async () => {
       if (!this.actions.files.confirmLeave()) return;
       if (!this.isHome && !(await this.actions.leaveWorkspace())) return;
       this.show();
-      if (id === '#rail-hosts') this.get<HTMLInputElement>('#host-search').focus();
     });
     this.get('#rail-files').addEventListener('click', () => this.showFiles());
     this.get('#rail-snippets').addEventListener('click', () => this.showSnippets());

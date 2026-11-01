@@ -19,6 +19,33 @@ async function dashboardFixture(page: Page) {
   await page.goto('/');
 }
 
+test('侧栏仅保留总览主机入口，切换后仍可搜索和添加主机', async ({ page }) => {
+  await dashboardFixture(page);
+
+  const navigation = page.getByRole('navigation', { name: '主导航' });
+  const overview = navigation.getByRole('button', { name: '总览', exact: true });
+  await expect(overview).toHaveCount(1);
+  await expect(navigation.getByRole('button', { name: '主机', exact: true })).toHaveCount(0);
+  await expect(page.locator('#rail-hosts')).toHaveCount(0);
+  await expect(overview).toHaveAttribute('aria-current', 'page');
+
+  await navigation.getByRole('button', { name: '文件管理', exact: true }).click();
+  await expect(page.locator('body')).toHaveAttribute('data-view', 'files');
+  await overview.click();
+  await expect(page.locator('body')).toHaveAttribute('data-view', 'dashboard');
+  await expect(overview).toHaveAttribute('aria-current', 'page');
+  await expect(navigation.locator('[aria-current="page"]')).toHaveCount(1);
+  await expect(page.locator('#host-list')).toContainText(host.name);
+
+  const search = page.getByRole('searchbox', { name: '搜索主机' });
+  await search.fill('no-matching-host');
+  await expect(page.locator('#host-list')).toContainText('没有匹配的主机');
+  await search.fill('Tokyo');
+  await expect(page.locator('#host-list')).toContainText(host.name);
+  await page.getByRole('button', { name: '＋ 添加主机', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '添加主机' })).toBeVisible();
+});
+
 test('主机列表编辑打开正确弹窗并回填资料', async ({ page }) => {
   await dashboardFixture(page);
 
