@@ -15,6 +15,7 @@ import { FileTree } from './file-tree';
 import { countryFlag } from './flags';
 import { ProcessManager, collectProcessManagerElements, type NetworkSample } from './process-manager';
 import { resetTerminalForConnection } from './terminal-session';
+import { installTerminalClipboard } from './terminal-clipboard';
 import { createTerminalTools, type TerminalToolsController } from './terminal-tools';
 import { WebSocketReconnectManager } from './ws-reconnect';
 import type { ReconnectLogEntry } from './ws-reconnect';
@@ -671,6 +672,10 @@ const fitAddon = new FitAddon();
 terminal.loadAddon(fitAddon);
 terminal.loadAddon(new WebLinksAddon());
 terminal.open(ui.terminalElement);
+installTerminalClipboard(terminal, {
+  localize: bilingual,
+  notify: (message, error) => toast(message, error ? 'error' : 'info'),
+});
 terminalTools = createTerminalTools({
   send: sendTerminalData,
   focusTerminal: () => terminal.focus(),
