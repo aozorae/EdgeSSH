@@ -47,7 +47,8 @@ import { SSHChannel, type ChannelDataChunk } from '../ssh/channel';
 import { SFTPHandler } from './sftp-handler';
 import { classifyHostKey } from '../ssh/host-key';
 import { encodeString, readUint32, toBufferSource } from '../ssh/utils';
-import { parseTopSnapshot } from './top-parser';
+import { ProcessSnapshotSampler } from './process-snapshot-sampler';
+import { PROCESS_MONITOR_COMMAND, PROCESS_SNAPSHOT_MARKER } from './process-monitor-command';
 import { retainTrailingMarkerPrefix } from './process-framing';
 import { parseSystemProbe, SYSTEM_PROBE_COMMAND } from './system-info';
 import { ForwardChannel } from '../forwarding/channel';
@@ -115,29 +116,6 @@ const PROCESS_KILL_CHANNEL_OPEN_TIMEOUT_MS = 15_000;
 const PROCESS_KILL_MAX_BUFFER_BYTES = 4 * 1024;
 const SYSTEM_PROBE_TIMEOUT_MS = 10_000;
 const SYSTEM_PROBE_MAX_BUFFER_BYTES = 16 * 1024;
-const PROCESS_SNAPSHOT_MARKER = '__CF_WEBSSH_TOP_SNAPSHOT__';
-// Octal escapes keep the delimiter itself out of the command line shown by top.
-// `top` flags differ across platforms: Linux procps uses `-n 1` (1 iteration) + `-c` (full command line),
-// but on FreeBSD `-n 1` means "show 1 process" and `-w` is unsupported — so the previous
-// Linux-only fallback chain silently truncated FreeBSD output to a single process row.
-// `-c` is required on Linux/macOS because their top defaults to showing just the program name;
-// FreeBSD top shows the full command line by default.
-// Width handling: without a tty, top (both procps and busybox) defaults to a narrow width and
-// truncates long command lines with a '+' marker. procps supports `-w 0` (unlimited); busybox
-// rejects `-w` and falls back to the plain form, but honors the COLUMNS env var — so we export
-// COLUMNS=4096 and use a fallback chain on Linux to cover both implementations.
-//   Linux:    top -b -c -n 1 -w 0  ||  top -b -c -n 1  ||  top -b -n 1
-//   FreeBSD:  top -b -a -d 1            (batch, all processes, 1 iteration)
-//   macOS:    top -l 1 -c -n 0 -s 0     (1 log sample, full command line, all processes, no delay)
-// Network sampling: every loop iteration prints an empty `__CF_WEBSSH_NETWORK__` block after top
-// and (best-effort) populates it with every non-virtual interface's cumulative rx/tx bytes, capped
-// at 32 rows so a host with many adapters cannot bloat the snapshot. The Linux branch reads
-// /sys/class/net/<iface>/statistics/{rx,tx}_bytes and skips lo/docker/veth/bridge/tun/tailscale
-// names so we never accidentally chart a container virtual NIC. The macOS fallback runs
-// `netstat -ibn` and takes the first 32 <Link#N> rows that are not `lo*`. Any failure
-// (no /sys/class/net, netstat missing, non-numeric counters) leaves the block empty and the
-// frontend treats the tick as "no network sample".
-const PROCESS_MONITOR_COMMAND = "LC_ALL=C LANG=C sh -c 'os=$(uname -s 2>/dev/null || echo Linux); export COLUMNS=4096; while :; do printf \"\\137\\137CF_WEBSSH_TOP_SNAPSHOT\\137\\137\\n\"; case \"$os\" in FreeBSD) top -b -a -d 1 2>/dev/null || exit 127;; Darwin) top -l 1 -c -n 0 -s 0 2>/dev/null || exit 127;; *) top -b -c -n 1 -w 0 2>/dev/null || top -b -c -n 1 2>/dev/null || top -b -n 1 2>/dev/null || exit 127;; esac; printf \"\\137\\137CF_WEBSSH_NETWORK\\137\\137\\n\"; NETN=0; if [ -d /sys/class/net ]; then for NDIR in /sys/class/net/*; do [ -d \"$NDIR\" ] || continue; NAME=${NDIR##*/}; case \"$NAME\" in lo|docker*|veth*|br-*|tun*|tailscale*) continue;; esac; RX=$(cat \"$NDIR/statistics/rx_bytes\" 2>/dev/null) || continue; TX=$(cat \"$NDIR/statistics/tx_bytes\" 2>/dev/null) || continue; case \"$RX$TX\" in *[!0-9]*) continue;; esac; NETN=$((NETN+1)); [ \"$NETN\" -ge 32 ] && break; printf \"%s\\t%s\\t%s\\n\" \"$NAME\" \"$RX\" \"$TX\"; done; elif command -v netstat >/dev/null 2>&1; then netstat -ibn 2>/dev/null | grep -v \"^lo\" | grep \"<Link#[0-9]>\" | head -n 32 | awk -v OFS=\"\\t\" \"{print \\$1, \\$7, \\$10}\"; fi; sleep 2; done'";
 const KEEPALIVE_NAME = new TextEncoder().encode('keepalive@openssh.com');
 
 export class SSHSession {
@@ -191,6 +169,7 @@ export class SSHSession {
   private processWebSocket: WebSocket | null = null;
   private processAttachUrl = '';
   private processBuffer = '';
+  private readonly processSnapshotSampler = new ProcessSnapshotSampler();
   private processDecoder = new TextDecoder();
   private pendingProcessChannelOpen: PendingProcessChannelOpen | null = null;
   // Concurrent `kill -TERM <pid>` requests, keyed by local channel ID. Each request gets its
@@ -308,6 +287,7 @@ export class SSHSession {
     this.clearPendingProcessChannelOpen();
     this.processChannel = null;
     this.processBuffer = '';
+    this.processSnapshotSampler.reset();
     for (const kill of this.pendingProcessKillChannels.values()) {
       if (kill.timeout) clearTimeout(kill.timeout);
     }
@@ -1172,6 +1152,7 @@ export class SSHSession {
     this.processChannel = channel;
     this.processBuffer = '';
     this.processDecoder = new TextDecoder();
+    this.processSnapshotSampler.reset();
     this.pendingProcessChannelOpen = pending;
     try {
       await this.sendEncrypted(channel.buildOpenSession(channelID));
@@ -1192,6 +1173,7 @@ export class SSHSession {
     if (pending?.channel === channel) pending.cancelled = true;
     this.processChannel = null;
     this.processBuffer = '';
+    this.processSnapshotSampler.reset();
     if (!channel?.isOpen()) return;
     await this.sendAuxiliaryChannelClose(channel);
   }
@@ -1229,7 +1211,7 @@ export class SSHSession {
   }
 
   private emitProcessSnapshot(raw: string): void {
-    const snapshot = parseTopSnapshot(raw);
+    const snapshot = this.processSnapshotSampler.parse(raw);
     if (snapshot) this.sendProcessJson({ type: 'process_snapshot', ...snapshot });
   }
 
