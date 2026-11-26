@@ -118,3 +118,31 @@ test('菜单边缘定位、关闭及剪贴板降级和失败提示', async ({ pa
   await page.getByRole('menuitem', { name: '复制', exact: true }).click();
   await expect(page.getByText('复制失败，请检查浏览器剪贴板权限。', { exact: true })).toBeVisible();
 });
+
+test('远端鼠标模式下普通右键传给 PTY，Shift+右键打开本地菜单', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Physical mouse interaction');
+  const fixture = await terminalFixture(page);
+  const screen = page.locator('.xterm-screen');
+  const terminal = page.locator('.xterm');
+  const menu = page.getByRole('menu');
+  const inputs = () => fixture.calls.filter((call) => call.type === 'input').map((call) => call.data).join('');
+
+  fixture.sshSockets[0].send(Buffer.from('\x1b[?1000h\x1b[?1006h'));
+  await expect(terminal).toHaveClass(/enable-mouse-events/);
+  await screen.click({ button: 'right', position: { x: 25, y: 10 } });
+  await expect.poll(inputs).toMatch(/\x1b\[<2;\d+;\d+M/);
+  await expect.poll(inputs).toMatch(/\x1b\[<2;\d+;\d+m/);
+  await expect(menu).toBeHidden();
+
+  const before = inputs();
+  await screen.click({ button: 'right', modifiers: ['Shift'], position: { x: 25, y: 10 } });
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeHidden();
+  expect(inputs()).toBe(before);
+
+  fixture.sshSockets[0].send(Buffer.from('\x1b[?1000l\x1b[?1006l'));
+  await expect(terminal).not.toHaveClass(/enable-mouse-events/);
+  await screen.click({ button: 'right', position: { x: 25, y: 10 } });
+  await expect(menu).toBeVisible();
+});

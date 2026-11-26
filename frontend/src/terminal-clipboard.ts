@@ -66,16 +66,22 @@ export function installTerminalClipboard(terminal: Terminal, options: ClipboardO
     }
   };
 
-  // Stop the right-button mousedown before xterm focuses/reports it to the PTY.
-  // Left-button selection and Shift+drag in mouse-aware applications stay native.
+  // Respect mouse-aware remote programs. Shift+right-click always opens the
+  // local menu, while ordinary right-click reaches the PTY in mouse mode.
+  const useLocalMenu = (event: MouseEvent) =>
+    terminal.modes.mouseTrackingMode === 'none' || event.shiftKey;
   element.addEventListener('mousedown', (event) => {
-    if (event.button !== 2) return;
+    if (event.button !== 2 || !useLocalMenu(event)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   }, true);
   element.addEventListener('contextmenu', (event) => {
     event.preventDefault();
     event.stopImmediatePropagation();
+    if (!useLocalMenu(event)) {
+      close();
+      return;
+    }
     selectedText = terminal.getSelection();
     // Fullscreen elements live in the browser top layer; a body-level menu
     // would be hidden behind the terminal while fullscreen is active.
@@ -102,6 +108,7 @@ export function installTerminalClipboard(terminal: Terminal, options: ClipboardO
   menu.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
+      event.stopPropagation();
       close(true);
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
